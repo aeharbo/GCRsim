@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from itertools import chain
 from tqdm import tqdm
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def mean_excitation_energy_HgCdTe(x):
     """
@@ -398,7 +400,7 @@ class CosmicRaySimulation:
 
     def __init__(self, species_index = 1, grid_size=64, cell_size=10, cell_depth=5, dt = 3.04, 
                  step_size=0.1, material_Z=Z_mean, material_A=A_mean, I0=I_value_MeV, material_density=HgCdTe_density, X0=X0_cm,
-                 color_list=color_list, date=2018+frac_amounts[6], historic_df=month_df, progress_bar = False):
+                 color_list=color_list, date=2018+frac_amounts[6], historic_df=month_df, progress_bar = False, max_workers = None):
         """
         Parameters:
           species_index = index of species to use for various species dependent lists
@@ -452,7 +454,8 @@ class CosmicRaySimulation:
         # Color list for particles
         self.color_list = color_list 
         self.progress_bar = progress_bar
-        
+        self.max_workers = max_workers or 4     # or whatever default you prefer
+        self._lock = threading.Lock()  
     @classmethod
     def run_full_sim(cls,
                         grid_size: int = 4096,
@@ -486,7 +489,7 @@ class CosmicRaySimulation:
             streaks_list.append(streaks)
 
             # you'll need species_names available in this module
-            name = species_names.get(idx, f"Z={sim.Z_particle}")
+            name = cls.species_names.get(idx, f"Z={sim.Z_particle}")
             gcr_counts.append((name, count))
 
         # element-wise sum across all species
@@ -1030,86 +1033,95 @@ class CosmicRaySimulation:
         delta_ray_counter = 1
         primary_idx = (PID >> 14) & ((1 << 11) - 1)
         
-        while current_energy > 0:
-            delta_x = s * np.sin(theta) * np.cos(phi)
-            delta_y = s * np.sin(theta) * np.sin(phi)
-            delta_z = s * np.cos(theta)
-            x0 += delta_x; y0 += delta_y; z0 += delta_z
+ # create executor for delta rays
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = []
 
-            if not (0 <= x0 <= self.cell_size * self.grid_size and
-                    0 <= y0 <= self.cell_size * self.grid_size and
-                    0 <= z0 <= self.cell_depth):
-                break
+            while init_en > 0:
+                delta_x = s * np.sin(theta) * np.cos(phi)
+                delta_y = s * np.sin(theta) * np.sin(phi)
+                delta_z = s * np.cos(theta)
+                x0 += delta_x; y0 += delta_y; z0 += delta_z
 
-            grid_x = int(x0 / self.cell_size)
-            grid_y = int(y0 / self.cell_size)
-            if 0 <= grid_x < self.grid_size and 0 <= grid_y < self.grid_size:
-                heatmap[grid_y, grid_x] += 1
-                positions.append((x0, y0, z0))
-            else:
-                break
+                if not (0 <= x0 <= self.cell_size * self.grid_size and
+                        0 <= y0 <= self.cell_size * self.grid_size and
+                        0 <= z0 <= self.cell_depth):
+                    break
 
-            # Energy loss for primary particle
-            dE_dx = self.dEdx_primary(current_energy)
-            dE = dE_dx * s_cm
+                grid_x = int(x0 / self.cell_size)
+                grid_y = int(y0 / self.cell_size)
+                if 0 <= grid_x < self.grid_size and 0 <= grid_y < self.grid_size:
+                    heatmap[grid_y, grid_x] += 1
+                    positions.append((x0, y0, z0))
+                else:
+                    break
 
-            # --- Delta ray production ---
-            T_min = 0.001  # 1 keV in MeV
-            T_max_val = self.Tmax_primary(current_energy)
-            # Here we assume a modulating function g(T)=1.
-            T_vals = np.logspace(np.log10(T_min), np.log10(T_max_val), 1000)
-            integrand = 1.0 / T_vals**2
-            integral_value = np.trapz(integrand, T_vals) # chagned "trapz" to trapezoid to remove deprecation error in Zac's Code
-            delta_N = ((self.K * self.material_Z * self.Z_particle**2) /
-                       (self.material_A * (self.beta(current_energy, self.M))**2)) * (1/T_min**2) * integral_value * s_cm
+                # Energy loss for primary particle
+                dE_dx = self.dEdx_primary(current_energy)
+                dE = dE_dx * s_cm
 
-            if np.random.uniform(0, 1) < delta_N:
-                accepted = False
-                while not accepted:
-                    x_inv = np.random.uniform(1/T_max_val, 1/T_min)
-                    T_candidate = 1 / x_inv
-                    if np.random.uniform(0, 1) < 1:
-                        accepted = True
-                T_delta = T_candidate
-                current_energy -= T_delta
+                # --- Delta ray production ---
+                T_min = 0.001  # 1 keV in MeV
+                T_max_val = self.Tmax_primary(current_energy)
+                # Here we assume a modulating function g(T)=1.
+                T_vals = np.logspace(np.log10(T_min), np.log10(T_max_val), 1000)
+                integrand = 1.0 / T_vals**2
+                integral_value = np.trapz(integrand, T_vals) # chagned "trapz" to trapezoid to remove deprecation error in Zac's Code
+                delta_N = ((self.K * self.material_Z * self.Z_particle**2) /
+                        (self.material_A * (self.beta(current_energy, self.M))**2)) * (1/T_min**2) * integral_value * s_cm
+
+                if np.random.uniform(0, 1) < delta_N:
+                    accepted = False
+                    while not accepted:
+                        x_inv = np.random.uniform(1/T_max_val, 1/T_min)
+                        T_candidate = 1 / x_inv
+                        if np.random.uniform(0, 1) < 1:
+                            accepted = True
+                    T_delta = T_candidate
+                    current_energy -= T_delta
+                    if current_energy <= 0:
+                        current_energy = 0
+                        break
+                    theta_delta = np.arccos(np.sqrt(T_delta / T_max_val))
+                    phi_delta = 2 * np.pi * np.random.uniform(0, 1)
+                    theta_global, phi_global = self.transform_angles(theta, phi, theta_delta, phi_delta)
+                    # Encode the delta ray PID:
+                    delta_ray_PID = CosmicRaySimulation.encode_pid(self.species_index, primary_idx, delta_ray_counter)
+                    delta_ray_counter += 1
+                    # Propagate the delta ray (secondary)
+                    futures.append(executor.submit(self._propagate_delta_ray_threadsafe, heatmap,
+                            x0/self.cell_size, y0/self.cell_size, z0/self.cell_depth,
+                            theta_global, phi_global, T_delta, delta_ray_PID, streaks))
+
+                current_energy -= dE
                 if current_energy <= 0:
                     current_energy = 0
                     break
-                theta_delta = np.arccos(np.sqrt(T_delta / T_max_val))
-                phi_delta = 2 * np.pi * np.random.uniform(0, 1)
-                theta_global, phi_global = self.transform_angles(theta, phi, theta_delta, phi_delta)
-                # Encode the delta ray PID:
-                delta_ray_PID = CosmicRaySimulation.encode_pid(self.species_index, primary_idx, delta_ray_counter)
-                delta_ray_counter += 1
-                # Propagate the delta ray (secondary)
-                self.propagate_delta_rays(heatmap, x0/self.cell_size, y0/self.cell_size, z0/self.cell_depth,
-                                           theta_global, phi_global, T_delta, delta_ray_PID, streaks)
 
-            current_energy -= dE
-            if current_energy <= 0:
-                current_energy = 0
-                break
-
-            mp = self.M
-            beta_val2 = np.sqrt(1 - (mp / (current_energy + mp))**2)
-            p = beta_val2 * (current_energy + mp) / self.c
-            theta0 = (13.6 / (beta_val2 * p * self.c)) * np.sqrt(s_cm / self.X0) * (1 + 0.038 * np.log(s_cm / self.X0))
-            theta0_values.append(theta0)
-            delta_theta = np.random.normal(0, theta0)
-            delta_phi = np.random.uniform(0, 2 * np.pi)
-            vx = np.sin(theta) * np.cos(phi)
-            vy = np.sin(theta) * np.sin(phi)
-            vz = np.cos(theta)
-            vx_new = vx + delta_theta * np.cos(delta_phi)
-            vy_new = vy + delta_theta * np.sin(delta_phi)
-            vz_new = vz
-            norm = np.sqrt(vx_new**2 + vy_new**2 + vz_new**2)
-            vx_new /= norm; vy_new /= norm; vz_new /= norm
-            theta = np.arccos(vz_new)
-            phi = np.arctan2(vy_new, vx_new)
-            current_vels.append((vx, vy, vz))
-            new_vels.append((vx_new,vy_new,vz_new))
-            energy_changes.append((dE, T_delta))
+                mp = self.M
+                beta_val2 = np.sqrt(1 - (mp / (current_energy + mp))**2)
+                p = beta_val2 * (current_energy + mp) / self.c
+                theta0 = (13.6 / (beta_val2 * p * self.c)) * np.sqrt(s_cm / self.X0) * (1 + 0.038 * np.log(s_cm / self.X0))
+                theta0_values.append(theta0)
+                delta_theta = np.random.normal(0, theta0)
+                delta_phi = np.random.uniform(0, 2 * np.pi)
+                vx = np.sin(theta) * np.cos(phi)
+                vy = np.sin(theta) * np.sin(phi)
+                vz = np.cos(theta)
+                vx_new = vx + delta_theta * np.cos(delta_phi)
+                vy_new = vy + delta_theta * np.sin(delta_phi)
+                vz_new = vz
+                norm = np.sqrt(vx_new**2 + vy_new**2 + vz_new**2)
+                vx_new /= norm; vy_new /= norm; vz_new /= norm
+                theta = np.arccos(vz_new)
+                phi = np.arctan2(vy_new, vx_new)
+                current_vels.append((vx, vy, vz))
+                new_vels.append((vx_new,vy_new,vz_new))
+                energy_changes.append((dE, T_delta))
+                
+                            # wait for all delta‐rays to finish
+            for _ in as_completed(futures):
+                pass
         if positions:
             #pdb.set_trace()
             streaks.append( ( positions, PID, len(positions), theta_init, phi_init, theta, phi, theta0_values,
@@ -1209,13 +1221,18 @@ class CosmicRaySimulation:
             species_streaks.append(streaks)
         
         return heatmap, species_streaks, primary_gcr_count
+        
+    def _propagate_delta_ray_threadsafe(self, heatmap, x, y, z, theta, phi, init_en, PID, streaks):
+        """Wrapper to call propagate_delta_rays under a lock."""
+        with self._lock:
+            self.propagate_delta_rays(heatmap, x, y, z, theta, phi, init_en, PID, streaks)
 
-# Define a mapping from species index to species name.
-species_names = {0: "e", 1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O", 9: "F", 10: "Ne", 11: "Na",
-    12: "Mg", 13: "Al", 14: "Si", 15: "P", 16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 21: "Sc", 22: "Ti", 23: "V", 
-    24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu", 30: "Zn", 31: "Ga", 32: "Ge", 33: "As", 34: "Se",
-    35: "Br", 36: "Kr", 37: "Rb", 38: "Sr", 39: "Y", 40: "Zr", 41: "Nb", 42: "Mo", 43: "Tc", 44: "Ru", 45: "Rh", 46: "Pd",
-    47: "Ag", 48: "Cd", 49: "In", 50: "Sn", 51: "Sb", 52: "Te", 53: "I", 54: "Xe", 55: "Cs", 56: "Ba", 57: "La", 58: "Ce",
-    59: "Pr", 60: "Nd", 61: "Pm", 62: "Sm", 63: "Eu", 64: "Gd", 65: "Tb", 66: "Dy", 67: "Ho", 68: "Er", 69: "Tm", 70: "Yb",
-    71: "Lu", 72: "Hf", 73: "Ta", 74: "W", 75: "Re", 76: "Os", 77: "Ir", 78: "Pt", 79: "Au", 80: "Hg", 81: "Tl", 82: "Pb",
-    83: "Bi", 90: "Th", 92: "U"}
+    # Define a mapping from species index to species name.
+    species_names = {0: "e", 1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O", 9: "F", 10: "Ne", 11: "Na",
+        12: "Mg", 13: "Al", 14: "Si", 15: "P", 16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca", 21: "Sc", 22: "Ti", 23: "V", 
+        24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu", 30: "Zn", 31: "Ga", 32: "Ge", 33: "As", 34: "Se",
+        35: "Br", 36: "Kr", 37: "Rb", 38: "Sr", 39: "Y", 40: "Zr", 41: "Nb", 42: "Mo", 43: "Tc", 44: "Ru", 45: "Rh", 46: "Pd",
+        47: "Ag", 48: "Cd", 49: "In", 50: "Sn", 51: "Sb", 52: "Te", 53: "I", 54: "Xe", 55: "Cs", 56: "Ba", 57: "La", 58: "Ce",
+        59: "Pr", 60: "Nd", 61: "Pm", 62: "Sm", 63: "Eu", 64: "Gd", 65: "Tb", 66: "Dy", 67: "Ho", 68: "Er", 69: "Tm", 70: "Yb",
+        71: "Lu", 72: "Hf", 73: "Ta", 74: "W", 75: "Re", 76: "Os", 77: "Ir", 78: "Pt", 79: "Au", 80: "Hg", 81: "Tl", 82: "Pb",
+        83: "Bi", 90: "Th", 92: "U"}
