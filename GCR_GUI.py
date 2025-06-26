@@ -10,7 +10,7 @@ from GCRsim_v02f import CosmicRaySimulation
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Cosmic Ray Simulator")
+        self.title("GCRsim(alpha-build)")
         self.geometry("900x600")
 
         # style for completed progress bar
@@ -74,16 +74,16 @@ class Application(tk.Tk):
         params.pack(side='left', fill='y', padx=5, pady=5)
 
         labels = ["Grid Size:", "Exposure Time (dt):", "Date (fractional year):", "Max Workers:"]
-        vars_ = [(tk.IntVar, 1024, 'grid_size_var'),
-                 (tk.DoubleVar, 1.0, 'dt_var'),
-                 (tk.DoubleVar, 2025.0, 'date_var'),
+        vars_ = [(tk.IntVar, 4088, 'grid_size_var'),
+                 (tk.DoubleVar, 3.4, 'dt_var'),
+                 (tk.DoubleVar, 2026.123, 'date_var'),
                  (tk.IntVar, 4, 'max_workers_var')]
         for i, (label, (vtype, default, name)) in enumerate(zip(labels, vars_)):
             ttk.Label(params, text=label).grid(row=i, column=0, sticky='e')
             setattr(self, name, vtype(value=default))
             ttk.Entry(params, textvariable=getattr(self, name), width=10).grid(row=i, column=1)
 
-        self.full_sim_var = tk.BooleanVar(value=False)
+        self.full_sim_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(params, text="Run all species", variable=self.full_sim_var).grid(row=4, columnspan=2, pady=5)
 
         btns = ttk.Frame(frame)
@@ -106,17 +106,27 @@ class Application(tk.Tk):
 
     def create_3d_tab(self):
         frame = self.tab_3d
+
         control_row = ttk.Frame(frame)
         control_row.pack(side='top', fill='x', padx=5, pady=3)
-        ttk.Label(control_row, text="Select Primary PID:").pack(side='left')
 
+        ttk.Label(control_row, text="Select Primary PID:").pack(side='left')
         self.selected_primary_pid = tk.StringVar()
         self.primary_pid_combobox = ttk.Combobox(
             control_row, textvariable=self.selected_primary_pid, state='readonly'
         )
         self.primary_pid_combobox.pack(side='left')
-        self.primary_pid_combobox.bind('<<ComboboxSelected>>', lambda e: self._plot_3d_for_primary_pid())
+        self.primary_pid_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_3d_delta_dropdown())
         self.primary_pid_combobox.state(['disabled'])
+
+        ttk.Label(control_row, text="Delta Ray PID:").pack(side='left')
+        self.selected_3d_delta_pid = tk.StringVar()
+        self.combo_3d_delta_pid = ttk.Combobox(
+            control_row, textvariable=self.selected_3d_delta_pid, state='readonly'
+        )
+        self.combo_3d_delta_pid.pack(side='left', padx=(5,0))
+        self.combo_3d_delta_pid.state(['disabled'])
+        self.combo_3d_delta_pid.bind('<<ComboboxSelected>>', lambda e: self._on_3d_delta_selection())
 
         fig = Figure(figsize=(5,5))
         self.traj_ax = fig.add_subplot(111, projection='3d')
@@ -125,6 +135,9 @@ class Application(tk.Tk):
         nav = NavigationToolbar2Tk(self.traj_canvas, frame)
         nav.update()
         nav.pack(side='bottom', fill='x')
+
+    def _on_3d_delta_selection(self):
+        self._plot_3d_for_primary_and_delta()
 
     def _populate_primary_pid_dropdown(self):
         all_pids = set()
@@ -144,12 +157,14 @@ class Application(tk.Tk):
         if human_list:
             self.selected_primary_pid.set(human_list[0])
             self.primary_pid_combobox.state(['!disabled'])
-            self._plot_3d_for_primary_pid()
+            self._plot_3d_for_primary_and_delta()
         else:
             self.selected_primary_pid.set('')
             self.primary_pid_combobox.state(['disabled'])
+        self._update_3d_delta_dropdown()
 
-    def _plot_3d_for_primary_pid(self):
+    def _update_3d_delta_dropdown(self):
+        # Populate the delta ray dropdown based on selected primary
         selection = self.selected_primary_pid.get()
         pid_int = None
         for human, pid in self.primary_pid_choices:
@@ -157,23 +172,72 @@ class Application(tk.Tk):
                 pid_int = pid
                 break
         if pid_int is None:
-            self.traj_ax.clear()
-            self.traj_canvas.draw()
+            self.combo_3d_delta_pid['values'] = []
+            self.combo_3d_delta_pid.set('')
+            self.combo_3d_delta_pid.state(['disabled'])
+            self._plot_3d_for_primary_and_delta()
             return
+
+        # Find delta rays for this parent
         species_idx = (pid_int >> (11+14)) & ((1<<7)-1)
         primary_idx = (pid_int >> 14) & ((1<<11)-1)
-        parent_mask = ((species_idx, primary_idx))
-        def is_child_or_self(pid):
-            sp = (pid >> (11+14)) & ((1<<7)-1)
-            pr = (pid >> 14) & ((1<<11)-1)
-            return (sp, pr) == parent_mask
+        children = []
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for streak in bin:
+                    _, pid, *_ = streak
+                    sp = (pid >> (11+14)) & ((1<<7)-1)
+                    pr = (pid >> 14) & ((1<<11)-1)
+                    delta = pid & ((1<<14)-1)
+                    if (sp, pr) == (species_idx, primary_idx) and delta > 0:
+                        children.append(pid)
+        items = [("Show All", None)] + [(self.sim.decode_pid(pid), pid) for pid in children]
+        self.delta_choices_3d = items
+        self.combo_3d_delta_pid['values'] = [s for s, _ in items]
+        self.combo_3d_delta_pid.set("Show All")
+        self.combo_3d_delta_pid.state(['!disabled'])
+        self._plot_3d_for_primary_and_delta()
+
+    def _plot_3d_for_primary_and_delta(self):
+        # Get selection
+        primary_human = self.selected_primary_pid.get()
+        delta_human = self.selected_3d_delta_pid.get()
+        # Get the integer PID of the selected primary
+        pid_int = None
+        for human, pid in self.primary_pid_choices:
+            if human == primary_human:
+                pid_int = pid
+                break
+        if pid_int is None:
+            self.traj_ax.clear(); self.traj_canvas.draw(); return
+
+        species_idx = (pid_int >> (11+14)) & ((1<<7)-1)
+        primary_idx = (pid_int >> 14) & ((1<<11)-1)
+        parent_mask = (species_idx, primary_idx)
+
+        # See if we are showing all, or a specific delta
+        show_all = (delta_human == "Show All" or not delta_human)
+        chosen_delta_pid = None
+        if not show_all and hasattr(self, 'delta_choices_3d'):
+            for s, pid in self.delta_choices_3d:
+                if s == delta_human:
+                    chosen_delta_pid = pid
+                    break
+
         streaks_to_plot = []
         for species in (self.current_streaks or []):
-            for energy_bin in species:
-                for streak in energy_bin:
+            for bin in species:
+                for streak in bin:
                     positions, pid, *_ = streak
-                    if is_child_or_self(pid):
-                        streaks_to_plot.append((positions, pid))
+                    sp = (pid >> (11+14)) & ((1<<7)-1)
+                    pr = (pid >> 14) & ((1<<11)-1)
+                    delta = pid & ((1<<14)-1)
+                    if (sp, pr) == parent_mask:
+                        if show_all:
+                            streaks_to_plot.append((positions, pid))
+                        elif chosen_delta_pid is not None and pid == chosen_delta_pid:
+                            streaks_to_plot.append((positions, pid))
+
         self.traj_ax.clear()
         for positions, pid in streaks_to_plot:
             if len(positions) < 2: continue
@@ -186,7 +250,9 @@ class Application(tk.Tk):
         self.traj_ax.set_xlabel("X (μm)")
         self.traj_ax.set_ylabel("Y (μm)")
         self.traj_ax.set_zlabel("Z (μm)")
-        self.traj_ax.set_title(f"Trajectories for {selection}")
+        self.traj_ax.set_title(f"3D Trajectory: {primary_human}" +
+                            ("" if show_all else f" > {delta_human}"))
+        self.traj_ax.set_zlim(5, 0)
         self.traj_canvas.draw()
 
     def create_analysis_tab(self):
@@ -228,6 +294,13 @@ class Application(tk.Tk):
         self.positions_table['yscrollcommand'] = scrollbar.set
         self.positions_table.config(state='disabled')
 
+        # Export buttons
+        export_frame = ttk.Frame(frame)
+        export_frame.pack(fill='x', padx=10, pady=(0,5))
+        ttk.Button(export_frame, text="Export Table (CSV)", command=self._export_positions_table).pack(side='left', padx=3)
+        ttk.Button(export_frame, text="Export Energy Plot", command=self._export_energy_plot).pack(side='left', padx=3)
+        ttk.Button(export_frame, text="Export Angles Plot", command=self._export_angles_plot).pack(side='left', padx=3)
+
         # Plots
         plot_frame = ttk.Frame(frame)
         plot_frame.pack(fill='both', expand=True, padx=10, pady=2)
@@ -266,6 +339,9 @@ class Application(tk.Tk):
         self.analysis_delta_combobox.state(['disabled'])
         self.analysis_delta_combobox.set('')
         self._clear_analysis_info()
+        self.combo_3d_delta_pid.state(['disabled'])
+        self.combo_3d_delta_pid.set('')
+        self.delta_choices_3d = []
 
     def _ensure_sim(self):
         # Always make sure self.sim exists for any plotting or saving
@@ -568,6 +644,59 @@ class Application(tk.Tk):
                 loc='upper right', fontsize='small', framealpha=0.5
             )
         self.heatmap_canvas.draw()
+
+    def _export_positions_table(self):
+        streak = self._get_current_analysis_streak()
+        if not streak:
+            messagebox.showwarning("No Data", "No streak data to export.")
+            return
+        positions = streak[0]
+        fpath = filedialog.asksaveasfilename(defaultextension=".csv",
+            filetypes=[('CSV files','*.csv')], title="Save positions as CSV")
+        if not fpath:
+            return
+        import csv
+        with open(fpath, "w", newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['Step', 'X (um)', 'Y (um)', 'Z (um)'])
+            for i, (x, y, z) in enumerate(positions):
+                writer.writerow([i, x, y, z])
+        messagebox.showinfo("Exported", f"Positions table saved to:\n{fpath}")
+
+    def _export_energy_plot(self):
+        fpath = filedialog.asksaveasfilename(defaultextension=".png",
+            filetypes=[('PNG Image','*.png')], title="Save energy plot as PNG")
+        if not fpath:
+            return
+        self.energy_fig.savefig(fpath, dpi=150)
+        messagebox.showinfo("Exported", f"Energy plot saved to:\n{fpath}")
+
+    def _export_angles_plot(self):
+        fpath = filedialog.asksaveasfilename(defaultextension=".png",
+            filetypes=[('PNG Image','*.png')], title="Save angles plot as PNG")
+        if not fpath:
+            return
+        self.angles_fig.savefig(fpath, dpi=150)
+        messagebox.showinfo("Exported", f"Angles plot saved to:\n{fpath}")
+
+    def _get_current_analysis_streak(self):
+        # Helper to get currently displayed streak (primary or delta)
+        pid_str = self.selected_analysis_delta.get() or self.selected_analysis_primary.get()
+        pid_int = None
+        # Check in children first
+        for k, v in getattr(self, 'analysis_delta_children', []):
+            if v == pid_str:
+                pid_int = k
+                break
+        # If not a child, check primaries
+        if pid_int is None:
+            for k, v in getattr(self, 'analysis_primaries_list', []):
+                if v == pid_str:
+                    pid_int = k
+                    break
+        if pid_int is not None:
+            return self._find_streak_by_pid(pid_int)
+        return None
 
     def _display_results(self):
         try:
