@@ -105,13 +105,120 @@ class Application(tk.Tk):
         nav.pack(side='bottom', fill='x')
 
     def create_3d_tab(self):
+        frame = self.tab_3d
+        control_row = ttk.Frame(frame)
+        control_row.pack(side='top', fill='x', padx=5, pady=3)
+        ttk.Label(control_row, text="Select Primary PID:").pack(side='left')
+
+        self.selected_primary_pid = tk.StringVar()
+        self.primary_pid_combobox = ttk.Combobox(
+            control_row, textvariable=self.selected_primary_pid, state='readonly'
+        )
+        self.primary_pid_combobox.pack(side='left')
+        self.primary_pid_combobox.bind('<<ComboboxSelected>>', lambda e: self._plot_3d_for_primary_pid())
+        self.primary_pid_combobox.state(['disabled'])
+
         fig = Figure(figsize=(5,5))
         self.traj_ax = fig.add_subplot(111, projection='3d')
-        self.traj_canvas = FigureCanvasTkAgg(fig, master=self.tab_3d)
+        self.traj_canvas = FigureCanvasTkAgg(fig, master=frame)
         self.traj_canvas.get_tk_widget().pack(fill='both', expand=True)
+        nav = NavigationToolbar2Tk(self.traj_canvas, frame)
+        nav.update()
+        nav.pack(side='bottom', fill='x')
+
+    def _populate_primary_pid_dropdown(self):
+        all_pids = set()
+        pid_to_human = {}
+        for species in (self.current_streaks or []):
+            for energy_bin in species:
+                for streak in energy_bin:
+                    positions, pid, *_ = streak
+                    delta_idx = pid & ((1<<14)-1)
+                    if delta_idx == 0:
+                        all_pids.add(pid)
+                        pid_to_human[pid] = self.sim.decode_pid(pid)
+        sorted_pids = sorted(all_pids)
+        self.primary_pid_choices = [(pid_to_human[pid], pid) for pid in sorted_pids]
+        human_list = [s for s, p in self.primary_pid_choices]
+        self.primary_pid_combobox['values'] = human_list
+        if human_list:
+            self.selected_primary_pid.set(human_list[0])
+            self.primary_pid_combobox.state(['!disabled'])
+            self._plot_3d_for_primary_pid()
+        else:
+            self.selected_primary_pid.set('')
+            self.primary_pid_combobox.state(['disabled'])
+
+    def _plot_3d_for_primary_pid(self):
+        selection = self.selected_primary_pid.get()
+        pid_int = None
+        for human, pid in self.primary_pid_choices:
+            if human == selection:
+                pid_int = pid
+                break
+        if pid_int is None:
+            self.traj_ax.clear()
+            self.traj_canvas.draw()
+            return
+        species_idx = (pid_int >> (11+14)) & ((1<<7)-1)
+        primary_idx = (pid_int >> 14) & ((1<<11)-1)
+        parent_mask = ((species_idx, primary_idx))
+        def is_child_or_self(pid):
+            sp = (pid >> (11+14)) & ((1<<7)-1)
+            pr = (pid >> 14) & ((1<<11)-1)
+            return (sp, pr) == parent_mask
+        streaks_to_plot = []
+        for species in (self.current_streaks or []):
+            for energy_bin in species:
+                for streak in energy_bin:
+                    positions, pid, *_ = streak
+                    if is_child_or_self(pid):
+                        streaks_to_plot.append((positions, pid))
+        self.traj_ax.clear()
+        for positions, pid in streaks_to_plot:
+            if len(positions) < 2: continue
+            xs, ys, zs = zip(*positions)
+            col = self.sim.get_particle_color(pid)
+            is_primary = (pid & ((1<<14)-1)) == 0
+            alpha = 0.9 if is_primary else 0.4
+            lw = 2.5 if is_primary else 1
+            self.traj_ax.plot(xs, ys, zs, '-', color=col, alpha=alpha, linewidth=lw)
+        self.traj_ax.set_xlabel("X (μm)")
+        self.traj_ax.set_ylabel("Y (μm)")
+        self.traj_ax.set_zlabel("Z (μm)")
+        self.traj_ax.set_title(f"Trajectories for {selection}")
+        self.traj_canvas.draw()
 
     def create_analysis_tab(self):
-        ttk.Label(self.tab_analysis, text="Analysis tools coming soon...").pack(pady=10)
+        frame = self.tab_analysis
+        control_row = ttk.Frame(frame)
+        control_row.pack(side='top', fill='x', padx=5, pady=3)
+
+        # Dropdown for primaries
+        ttk.Label(control_row, text="Primary PID:").pack(side='left')
+        self.selected_analysis_primary = tk.StringVar()
+        self.analysis_primary_combobox = ttk.Combobox(
+            control_row, textvariable=self.selected_analysis_primary, state='readonly'
+        )
+        self.analysis_primary_combobox.pack(side='left', padx=(0, 10))
+        self.analysis_primary_combobox.state(['disabled'])
+        self.analysis_primary_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_analysis_primary())
+
+        # Dropdown for delta rays
+        ttk.Label(control_row, text="Delta Ray PID:").pack(side='left')
+        self.selected_analysis_delta = tk.StringVar()
+        self.analysis_delta_combobox = ttk.Combobox(
+            control_row, textvariable=self.selected_analysis_delta, state='readonly'
+        )
+        self.analysis_delta_combobox.pack(side='left')
+        self.analysis_delta_combobox.state(['disabled'])
+        self.analysis_delta_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_analysis_delta())
+
+        # Info display
+        self.analysis_info = tk.Text(frame, height=15, width=80, wrap='word', font=('Consolas', 10))
+        self.analysis_info.pack(fill='both', expand=True, padx=10, pady=8)
+        self.analysis_info.config(state='disabled')
+
 
     def create_advanced_tab(self):
         ttk.Label(self.tab_advanced, text="Advanced configuration coming soon...").pack(pady=10)
@@ -123,25 +230,57 @@ class Application(tk.Tk):
     def new_sim(self):
         for attr in ('current_heatmap','current_streaks','current_count'):
             setattr(self, attr, None)
+        self.sim = None
+        self._ensure_sim()
         self.heatmap_ax.clear(); self.heatmap_canvas.draw()
         self.traj_ax.clear();   self.traj_canvas.draw()
         self.log_text.delete('1.0','end')
+        self.analysis_primary_combobox.state(['disabled'])
+        self.analysis_primary_combobox.set('')
+        self.analysis_delta_combobox.state(['disabled'])
+        self.analysis_delta_combobox.set('')
+        self._clear_analysis_info()
+
+    def _ensure_sim(self):
+        # Always make sure self.sim exists for any plotting or saving
+        if self.sim is None:
+            grid = self.grid_size_var.get()
+            dt = self.dt_var.get()
+            date = self.date_var.get()
+            maxw = self.max_workers_var.get()
+            self.sim = CosmicRaySimulation(grid_size=grid, dt=dt, date=date, progress_bar=True, max_workers=maxw)
 
     def load_sim(self):
         f = filedialog.askopenfilename(filetypes=[('HDF5 files','*.h5')])
         if not f: return
         hm, st, ct = CosmicRaySimulation.load_sim(f)
-        self.current_heatmap, self.current_streaks, self.current_count = hm,st,ct
+        self.current_heatmap, self.current_streaks, self.current_count = hm, st, ct
+        self._ensure_sim()
         self._update_heatmap(hm)
-
+        self._display_results()
+        self.after(0, self._populate_primary_pid_dropdown)
+        self.after(0, self._populate_analysis_primary_dropdown)
+        messagebox.showinfo('Loaded', f'Simulation loaded from {f}')
+        
     def save_sim(self):
         if self.current_heatmap is None:
-            messagebox.showwarning('No Data','Run or load a simulation first.')
+            messagebox.showwarning('No Data', 'Run or load a simulation first.')
             return
-        f = filedialog.asksaveasfilename(defaultextension='.h5',filetypes=[('HDF5 files','*.h5')])
+        f = filedialog.asksaveasfilename(defaultextension='.h5', filetypes=[('HDF5 files', '*.h5')])
         if not f: return
-        self.sim.save_sim(self.current_heatmap,self.current_streaks,self.current_count,f)
-        messagebox.showinfo('Saved',f'Simulation saved to {f}')
+        self._ensure_sim()
+        # Standardize gcr_counts: if it's int, wrap as single-element list with name
+        gcr_counts = self.current_count
+        if isinstance(gcr_counts, int):
+            # Try to get species name from the current sim
+            try:
+                idx = self.sim.species_index if hasattr(self.sim, 'species_index') else 0
+                sp_name = self.sim.species_names.get(idx, f"Z={self.sim.Z_particle}")
+            except Exception:
+                sp_name = "Unknown"
+            gcr_counts = [(sp_name, gcr_counts)]
+        self.sim.save_sim(self.current_heatmap, self.current_streaks, gcr_counts, f)
+        messagebox.showinfo('Saved', f'Simulation saved to {f}')
 
     def run_sim(self):
         self.run_button.config(state='disabled')
@@ -180,6 +319,126 @@ class Application(tk.Tk):
         self.after(0, self.run_button.config, {'state':'normal'})
         maxv = self.progress['maximum']
         self.after(0, self.progress.config, {'style':'green.Horizontal.TProgressbar', 'value':maxv})
+        self.after(0, self._populate_primary_pid_dropdown)
+        self.after(0, self._populate_analysis_primary_dropdown)
+        
+    def _populate_analysis_primary_dropdown(self):
+        # Find all primary PIDs (delta_idx==0)
+        all_primaries = {}
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for streak in bin:
+                    _, pid, *_ = streak
+                    if (pid & ((1<<14)-1)) == 0:  # delta_idx==0
+                        all_primaries[pid] = self.sim.decode_pid(pid)
+        items = sorted(all_primaries.items(), key=lambda x: x[1])
+        self.analysis_primaries_list = items
+        self.analysis_primary_combobox['values'] = [v for k,v in items]
+        if items:
+            self.selected_analysis_primary.set(items[0][1])
+            self.analysis_primary_combobox.state(['!disabled'])
+            self._update_analysis_primary()
+        else:
+            self.selected_analysis_primary.set('')
+            self.analysis_primary_combobox.state(['disabled'])
+            self.analysis_delta_combobox['values'] = []
+            self.analysis_delta_combobox.set('')
+            self.analysis_delta_combobox.state(['disabled'])
+            self._clear_analysis_info()
+
+    def _update_analysis_primary(self):
+        selection = self.selected_analysis_primary.get()
+        pid_int = None
+        for k, v in self.analysis_primaries_list:
+            if v == selection:
+                pid_int = k
+                break
+        if pid_int is None:
+            self.analysis_delta_combobox['values'] = []
+            self.analysis_delta_combobox.set('')
+            self.analysis_delta_combobox.state(['disabled'])
+            self._clear_analysis_info()
+            return
+
+        # Find all streaks matching this primary PID
+        streak = self._find_streak_by_pid(pid_int)
+        if streak:
+            self._display_streak_info(streak)
+        else:
+            self._clear_analysis_info()
+
+        # Find all children delta rays
+        children = []
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for stk in bin:
+                    _, pid, *_ = stk
+                    # Same species & primary idx, delta idx>0
+                    if ((pid >> (11+14)) == (pid_int >> (11+14)) and
+                        ((pid >> 14) & ((1<<11)-1)) == ((pid_int >> 14) & ((1<<11)-1)) and
+                        (pid & ((1<<14)-1)) > 0):
+                        children.append((pid, self.sim.decode_pid(pid)))
+        children = sorted(children, key=lambda x: x[1])
+        self.analysis_delta_children = children
+        self.analysis_delta_combobox['values'] = [c[1] for c in children]
+        if children:
+            self.analysis_delta_combobox.state(['!disabled'])
+            self.selected_analysis_delta.set(children[0][1])
+        else:
+            self.analysis_delta_combobox.state(['disabled'])
+            self.selected_analysis_delta.set('')
+
+    def _update_analysis_delta(self):
+        selection = self.selected_analysis_delta.get()
+        pid_int = None
+        for k, v in self.analysis_delta_children:
+            if v == selection:
+                pid_int = k
+                break
+        if pid_int is not None:
+            streak = self._find_streak_by_pid(pid_int)
+            if streak:
+                self._display_streak_info(streak)
+            else:
+                self._clear_analysis_info()
+
+    def _find_streak_by_pid(self, pid_int):
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for streak in bin:
+                    _, pid, *_ = streak
+                    if pid == pid_int:
+                        return streak
+        return None
+
+    def _display_streak_info(self, streak):
+        (positions, pid, num_steps, theta_i, phi_i, theta_f, phi_f,
+        theta0_vals, curr_vels, new_vels, energy_changes,
+        start_pos, end_pos, init_en, final_en, delta_count, is_primary) = streak
+        info = []
+        info.append(f"PID: {self.sim.decode_pid(pid)}")
+        info.append(f"Type: {'Primary' if (pid & ((1<<14)-1))==0 else 'Delta Ray'}")
+        info.append(f"Steps: {num_steps}")
+        info.append(f"Initial Position: {tuple(np.round(start_pos,3))}")
+        info.append(f"Final Position:   {tuple(np.round(end_pos,3))}")
+        info.append(f"Initial Energy:   {init_en:.3f} MeV")
+        info.append(f"Final Energy:     {final_en:.3f} MeV")
+        info.append(f"Initial θ:        {theta_i:.4f} rad ({np.degrees(theta_i):.2f}°)")
+        info.append(f"Initial φ:        {phi_i:.4f} rad ({np.degrees(phi_i):.2f}°)")
+        info.append(f"Final θ:          {theta_f:.4f} rad ({np.degrees(theta_f):.2f}°)")
+        info.append(f"Final φ:          {phi_f:.4f} rad ({np.degrees(phi_f):.2f}°)")
+        info.append(f"# Delta rays produced: {delta_count}")
+        info.append(f"Number of recorded positions: {len(positions)}")
+        self.analysis_info.config(state='normal')
+        self.analysis_info.delete('1.0','end')
+        self.analysis_info.insert('1.0', '\n'.join(info))
+        self.analysis_info.config(state='disabled')
+
+    def _clear_analysis_info(self):
+        self.analysis_info.config(state='normal')
+        self.analysis_info.delete('1.0','end')
+        self.analysis_info.config(state='disabled')
+
 
     def _update_heatmap(self, data):
         self.heatmap_ax.clear()
