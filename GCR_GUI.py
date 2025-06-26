@@ -194,7 +194,7 @@ class Application(tk.Tk):
         control_row = ttk.Frame(frame)
         control_row.pack(side='top', fill='x', padx=5, pady=3)
 
-        # Dropdown for primaries
+        # Dropdowns (as before)...
         ttk.Label(control_row, text="Primary PID:").pack(side='left')
         self.selected_analysis_primary = tk.StringVar()
         self.analysis_primary_combobox = ttk.Combobox(
@@ -204,7 +204,6 @@ class Application(tk.Tk):
         self.analysis_primary_combobox.state(['disabled'])
         self.analysis_primary_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_analysis_primary())
 
-        # Dropdown for delta rays
         ttk.Label(control_row, text="Delta Ray PID:").pack(side='left')
         self.selected_analysis_delta = tk.StringVar()
         self.analysis_delta_combobox = ttk.Combobox(
@@ -214,10 +213,37 @@ class Application(tk.Tk):
         self.analysis_delta_combobox.state(['disabled'])
         self.analysis_delta_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_analysis_delta())
 
-        # Info display
-        self.analysis_info = tk.Text(frame, height=15, width=80, wrap='word', font=('Consolas', 10))
-        self.analysis_info.pack(fill='both', expand=True, padx=10, pady=8)
+        # Info
+        self.analysis_info = tk.Text(frame, height=11, width=80, wrap='word', font=('Consolas', 10))
+        self.analysis_info.pack(fill='x', padx=10, pady=3)
         self.analysis_info.config(state='disabled')
+
+        # Positions table (scrollable)
+        table_frame = ttk.Frame(frame)
+        table_frame.pack(fill='x', padx=10, pady=2)
+        self.positions_table = tk.Text(table_frame, height=6, width=90, font=('Consolas', 9))
+        self.positions_table.pack(side='left', fill='x', expand=True)
+        scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.positions_table.yview)
+        scrollbar.pack(side='left', fill='y')
+        self.positions_table['yscrollcommand'] = scrollbar.set
+        self.positions_table.config(state='disabled')
+
+        # Plots
+        plot_frame = ttk.Frame(frame)
+        plot_frame.pack(fill='both', expand=True, padx=10, pady=2)
+
+        # Energy loss plot
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+        self.energy_fig = Figure(figsize=(4,2.2))
+        self.energy_ax = self.energy_fig.add_subplot(111)
+        self.energy_canvas = FigureCanvasTkAgg(self.energy_fig, master=plot_frame)
+        self.energy_canvas.get_tk_widget().pack(side='left', fill='both', expand=True)
+        # Angles plot
+        self.angles_fig = Figure(figsize=(4,2.2))
+        self.angles_ax = self.angles_fig.add_subplot(111)
+        self.angles_canvas = FigureCanvasTkAgg(self.angles_fig, master=plot_frame)
+        self.angles_canvas.get_tk_widget().pack(side='left', fill='both', expand=True)
 
 
     def create_advanced_tab(self):
@@ -415,6 +441,8 @@ class Application(tk.Tk):
         (positions, pid, num_steps, theta_i, phi_i, theta_f, phi_f,
         theta0_vals, curr_vels, new_vels, energy_changes,
         start_pos, end_pos, init_en, final_en, delta_count, is_primary) = streak
+
+        # Info box
         info = []
         info.append(f"PID: {self.sim.decode_pid(pid)}")
         info.append(f"Type: {'Primary' if (pid & ((1<<14)-1))==0 else 'Delta Ray'}")
@@ -434,11 +462,70 @@ class Application(tk.Tk):
         self.analysis_info.insert('1.0', '\n'.join(info))
         self.analysis_info.config(state='disabled')
 
+        # Table of positions
+        self.positions_table.config(state='normal')
+        self.positions_table.delete('1.0','end')
+        header = f"{'Step':>4s} | {'X (μm)':>10s} | {'Y (μm)':>10s} | {'Z (μm)':>10s}\n"
+        self.positions_table.insert('end', header)
+        self.positions_table.insert('end', '-'*44+'\n')
+        for i, (x,y,z) in enumerate(positions[:100]):  # limit to 100 for display
+            self.positions_table.insert('end', f"{i:4d} | {x:10.3f} | {y:10.3f} | {z:10.3f}\n")
+        if len(positions) > 100:
+            self.positions_table.insert('end', f"... (truncated, total {len(positions)}) ...\n")
+        self.positions_table.config(state='disabled')
+
+        # Energy loss plot
+        self.energy_ax.clear()
+        dEs = [abs(de[0]) for de in energy_changes]
+        if dEs:
+            cumE = np.array([init_en] + list(np.array([init_en]) - np.cumsum(dEs)))
+            self.energy_ax.plot(range(len(cumE)), cumE, '-o', ms=3)
+            self.energy_ax.set_xlabel("Step")
+            self.energy_ax.set_ylabel("Energy (MeV)")
+            self.energy_ax.set_title("Cumulative Energy")
+        else:
+            self.energy_ax.set_title("No energy change data")
+        self.energy_fig.tight_layout()
+        self.energy_canvas.draw()
+
+        # Angles plot
+        self.angles_ax.clear()
+        thetas = []
+        phis = []
+        # Extract angles from velocity vectors, or theta0_vals if available
+        for v in new_vels:
+            vx, vy, vz = v
+            r = np.sqrt(vx**2 + vy**2 + vz**2)
+            if r == 0: continue
+            theta = np.arccos(np.clip(vz / r, -1, 1))
+            phi = np.arctan2(vy, vx)
+            thetas.append(theta)
+            phis.append(phi)
+        if thetas and phis:
+            self.angles_ax.plot(thetas, label='θ (rad)')
+            self.angles_ax.plot(phis, label='φ (rad)')
+            self.angles_ax.set_xlabel("Step")
+            self.angles_ax.set_ylabel("Angle (rad)")
+            self.angles_ax.set_title("Trajectory Angles")
+            self.angles_ax.legend()
+        else:
+            self.angles_ax.set_title("No angle data")
+        self.angles_fig.tight_layout()
+        self.angles_canvas.draw()
+
     def _clear_analysis_info(self):
         self.analysis_info.config(state='normal')
         self.analysis_info.delete('1.0','end')
         self.analysis_info.config(state='disabled')
-
+        self.positions_table.config(state='normal')
+        self.positions_table.delete('1.0','end')
+        self.positions_table.config(state='disabled')
+        self.energy_ax.clear()
+        self.energy_ax.set_title("")
+        self.energy_canvas.draw()
+        self.angles_ax.clear()
+        self.angles_ax.set_title("")
+        self.angles_canvas.draw()
 
     def _update_heatmap(self, data):
         self.heatmap_ax.clear()
