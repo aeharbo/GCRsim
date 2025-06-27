@@ -68,10 +68,11 @@ class Application(tk.Tk):
         self.create_advanced_tab()
         self.create_log_tab()
 
+
     def create_control_tab(self):
         frame = self.tab_control
         params = ttk.LabelFrame(frame, text="Simulation Parameters")
-        params.pack(side='left', fill='y', padx=5, pady=5)
+        params.pack(side='top', fill='x', padx=5, pady=5)
 
         labels = ["Grid Size:", "Exposure Time (dt):", "Date (fractional year):", "Max Workers:"]
         vars_ = [(tk.IntVar, 4088, 'grid_size_var'),
@@ -85,15 +86,44 @@ class Application(tk.Tk):
 
         self.full_sim_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(params, text="Run all species", variable=self.full_sim_var).grid(row=4, columnspan=2, pady=5)
-
-        btns = ttk.Frame(frame)
-        btns.pack(side='top', fill='x', padx=5, pady=5)
+        
+            # Buttons and simulation progress bar (in Simulation Parameters)
+        btns = ttk.Frame(params)
+        btns.grid(row=5, column=0, columnspan=2, pady=(8, 2), sticky='w')
         self.run_button = ttk.Button(btns, text="Run", command=self.run_sim)
-        self.run_button.pack(side='left')
-        ttk.Button(btns, text="Pause", command=self.pause_sim).pack(side='left')
-        ttk.Button(btns, text="Stop", command=self.stop_sim).pack(side='left')
+        self.run_button.pack(side='left', padx=(0, 2))
+        ttk.Button(btns, text="Pause", command=self.pause_sim).pack(side='left', padx=(0, 2))
+        ttk.Button(btns, text="Stop", command=self.stop_sim).pack(side='left', padx=(0, 6))
         self.progress = ttk.Progressbar(btns, orient='horizontal', length=200)
         self.progress.pack(side='left', padx=5)
+        
+        flux_forecast_frame = ttk.LabelFrame(frame, text="Primary GCR Flux Forecast")
+        flux_forecast_frame.pack(side='top', fill='x', padx=5, pady=(8,0))
+
+        ttk.Label(flux_forecast_frame, text="Start Year:").pack(side='left')
+        self.flux_start_var = tk.DoubleVar(value=2021)
+        ttk.Entry(flux_forecast_frame, textvariable=self.flux_start_var, width=7).pack(side='left')
+
+        ttk.Label(flux_forecast_frame, text="End Year:").pack(side='left', padx=(8,0))
+        self.flux_end_var = tk.DoubleVar(value=2022)
+        ttk.Entry(flux_forecast_frame, textvariable=self.flux_end_var, width=7).pack(side='left')
+
+        ttk.Label(flux_forecast_frame, text="Instances per Date:").pack(side='left', padx=(8,0))
+        self.flux_ninst_var = tk.IntVar(value=2)
+        ttk.Entry(flux_forecast_frame, textvariable=self.flux_ninst_var, width=4).pack(side='left')
+
+        self.flux_button = ttk.Button(flux_forecast_frame, text="Predict Flux", command=self.predict_flux)
+        self.flux_button.pack(side='top', pady=(3,0))
+        self.flux_progress = ttk.Progressbar(flux_forecast_frame, orient='horizontal', length=200, style="green.Horizontal.TProgressbar")
+        self.flux_progress.pack(side='top', fill='x', padx=5, pady=(2,8))
+        self.flux_progress["mode"] = "determinate"
+
+        self.flux_fig = Figure(figsize=(5,2.2), tight_layout=True)
+        self.flux_ax = self.flux_fig.add_subplot(111)
+        self.flux_canvas = FigureCanvasTkAgg(self.flux_fig, master=frame)
+        self.flux_canvas.get_tk_widget().pack(fill='x', padx=10, pady=(10, 5))
+
+
 
     def create_heatmap_tab(self):
         fig = Figure(figsize=(5,5))
@@ -135,6 +165,121 @@ class Application(tk.Tk):
         nav = NavigationToolbar2Tk(self.traj_canvas, frame)
         nav.update()
         nav.pack(side='bottom', fill='x')
+
+    def predict_flux(self):
+        self.flux_button.config(state='disabled')
+        self.flux_progress['value'] = 0
+        self._ensure_sim()
+        start_date = self.flux_start_var.get()
+        end_date = self.flux_end_var.get()
+        n_instances = self.flux_ninst_var.get()
+        df = self.sim.historic_df
+
+        # Generate all dates at the spacing in your DataFrame (assume monthly spacing)
+        date_min, date_max = df['date'].min(), df['date'].max()
+        # Step size: median difference (should work for monthly/yearly)
+        step = np.median(np.diff(df['date'].values))
+        requested_dates = np.arange(start_date, end_date + step, step)
+        
+        # Map each requested date to a usable historical date (for M_value)
+        mapped_dates = []
+        for d in requested_dates:
+            if d <= date_max:
+                mapped_dates.append(d)
+            else:
+                # Wrap back by 22-year periodicity
+                mapped_dates.append(d - 22)
+        # Just as a tuple so you can track both real and mapped dates
+        reference_dates = list(zip(requested_dates, mapped_dates))
+        # Optionally: validate mapped_dates all in range
+        mapped_dates = np.array(mapped_dates)
+        if np.any(mapped_dates < date_min):
+            messagebox.showwarning("Forecast Error", f"Some forecasted dates are out of range after mapping. Try a smaller date range.")
+            self.flux_button.config(state='normal')
+            return
+
+        if n_instances < 1:
+            messagebox.showwarning("Invalid Instances", "Instances per date must be at least 1.")
+            self.flux_button.config(state='normal')
+            return
+        exposure_time = self.dt_var.get()
+        grid_size = self.grid_size_var.get()
+
+        threading.Thread(
+            target=self._predict_flux_worker,
+            args=(reference_dates, n_instances, exposure_time, grid_size),
+            daemon=True
+        ).start()
+
+    def _predict_flux_worker(self, reference_dates, n_instances, exposure_time, grid_size):
+        avg_particles = []
+        std_particles = []
+        all_particles = []
+        progress_total = len(reference_dates) * n_instances
+        self.flux_progress["maximum"] = progress_total
+
+        for i, (real_date, mapped_date) in enumerate(reference_dates):
+            counts = []
+            for j in range(n_instances):
+                # For each sim, use the mapped_date for M_value calculations
+                sim = CosmicRaySimulation(
+                    grid_size=grid_size,
+                    dt=exposure_time,
+                    date=mapped_date,     # <-- this is the only key difference!
+                    historic_df=self.sim.historic_df,
+                    progress_bar=True
+                )
+                _, _, particle_counts = sim.run_sim()
+                if isinstance(particle_counts, int):
+                    total_particles = particle_counts
+                elif isinstance(particle_counts, (list, tuple)):
+                    total_particles = sum(particle_counts)
+                elif isinstance(particle_counts, dict):
+                    total_particles = sum(particle_counts.values())
+                else:
+                    total_particles = 0
+                counts.append(total_particles)
+                del sim
+                self.flux_progress["value"] += 1
+                self.flux_progress.update()
+            avg_particles.append(np.mean(counts))
+            std_particles.append(np.std(counts))
+            all_particles.append(counts)
+
+        # For plotting, use real_date
+        real_dates = [rd for rd, _ in reference_dates]
+        self.after(0, self._plot_flux_results, real_dates, avg_particles, std_particles)
+        
+    def _plot_flux_results(self, dates, avg_particles, std_particles):
+        self.flux_ax.clear()
+        self.flux_ax.errorbar(
+            dates, avg_particles, yerr=std_particles,
+            fmt='o-', mfc='red', mec='black', ecolor='blue', alpha=0.75, capsize=3,
+            label=f'Avg count per date'
+        )
+        if avg_particles:
+            max_idx = int(np.argmax(avg_particles))
+            max_date = dates[max_idx]
+            max_value = avg_particles[max_idx]
+            self.flux_ax.annotate(f"Max: {max_value:.0f}\nYear: {max_date:.1f}",
+                xy=(max_date, max_value),
+                xytext=(max_date, max_value + 0.25 * max_value),
+                arrowprops=dict(facecolor='black', arrowstyle='->'),
+                ha='center')
+        self.flux_ax.set_xlabel("Date")
+        self.flux_ax.set_ylabel("Predicted H+ GCR Count ")
+        self.flux_ax.set_title(f'H+ Galactic Cosmic Ray Flux Forecast\n({dates[0]:.1f}–{dates[-1]:.1f})')
+        
+        grid_size = self.grid_size_var.get()
+        dt = self.dt_var.get()
+        species_name = self.sim.species_names.get(self.sim.species_index, f"Z={self.sim.Z_particle}")
+        subtitle = f"Grid Size: {grid_size}x{grid_size} pixels, Exposure Time (dt): {dt} sec, Species: {species_name}+ ions"
+        # Add subtitle just below the main title using ax.text
+        self.flux_ax.text(0.5, 1.02, subtitle, ha='center',va='bottom', fontsize='medium', transform=self.flux_ax.transAxes)
+        self.flux_ax.legend()
+        self.flux_canvas.draw()
+        self.flux_button.config(state='normal')
+        self.flux_progress['value'] = 0  # Reset
 
     def _on_3d_delta_selection(self):
         self._plot_3d_for_primary_and_delta()
@@ -397,6 +542,7 @@ class Application(tk.Tk):
             self.progress.config(mode='indeterminate'); self.progress.start(10)
         threading.Thread(target=self._run_sim_thread, daemon=True).start()
 
+
     def _run_sim_thread(self):
         full = self.full_sim_var.get()
         if full:
@@ -423,6 +569,7 @@ class Application(tk.Tk):
         self.after(0, self.progress.config, {'style':'green.Horizontal.TProgressbar', 'value':maxv})
         self.after(0, self._populate_primary_pid_dropdown)
         self.after(0, self._populate_analysis_primary_dropdown)
+
         
     def _populate_analysis_primary_dropdown(self):
         # Find all primary PIDs (delta_idx==0)
