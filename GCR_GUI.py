@@ -122,8 +122,10 @@ class Application(tk.Tk):
         self.flux_ax = self.flux_fig.add_subplot(111)
         self.flux_canvas = FigureCanvasTkAgg(self.flux_fig, master=frame)
         self.flux_canvas.get_tk_widget().pack(fill='x', padx=10, pady=(10, 5))
-
-
+        # Add navigation toolbar for interactivity
+        self.flux_nav = NavigationToolbar2Tk(self.flux_canvas, frame)
+        self.flux_nav.update()
+        self.flux_nav.pack(side='top', fill='x', padx=10, pady=(0, 3))
 
     def create_heatmap_tab(self):
         fig = Figure(figsize=(5,5))
@@ -251,6 +253,7 @@ class Application(tk.Tk):
         self.after(0, self._plot_flux_results, real_dates, avg_particles, std_particles)
         
     def _plot_flux_results(self, dates, avg_particles, std_particles):
+        self.flux_fig = Figure(figsize=(5, 3), constrained_layout=True)
         self.flux_ax.clear()
         self.flux_ax.errorbar(
             dates, avg_particles, yerr=std_particles,
@@ -261,14 +264,14 @@ class Application(tk.Tk):
             max_idx = int(np.argmax(avg_particles))
             max_date = dates[max_idx]
             max_value = avg_particles[max_idx]
-            self.flux_ax.annotate(f"Max: {max_value:.0f}\nYear: {max_date:.1f}",
+            self.flux_ax.annotate(f"Max: {max_value:.0f}\nYear: {max_date:.3f}",
                 xy=(max_date, max_value),
                 xytext=(max_date, max_value + 0.25 * max_value),
                 arrowprops=dict(facecolor='black', arrowstyle='->'),
                 ha='center')
         self.flux_ax.set_xlabel("Date")
-        self.flux_ax.set_ylabel("Predicted H+ GCR Count ")
-        self.flux_ax.set_title(f'H+ Galactic Cosmic Ray Flux Forecast\n({dates[0]:.1f}–{dates[-1]:.1f})')
+        self.flux_ax.set_ylabel("Predicted H+ GCR Count")
+        self.flux_ax.set_title(f'Galactic Cosmic Ray Flux Forecast \n')
         
         grid_size = self.grid_size_var.get()
         dt = self.dt_var.get()
