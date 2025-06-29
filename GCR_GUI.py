@@ -1,8 +1,10 @@
 import tkinter as tk
+import h5py
 from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm
+from matplotlib.lines import Line2D
 import numpy as np
 import threading
 from GCRsim_v02f import CosmicRaySimulation
@@ -11,7 +13,7 @@ class Application(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("GCRsim(alpha-build)")
-        self.geometry("900x600")
+        self.geometry("980x700")
 
         # style for completed progress bar
         self.style = ttk.Style(self)
@@ -37,6 +39,9 @@ class Application(tk.Tk):
         filemenu.add_command(label="Load Simulation", command=self.load_sim)
         filemenu.add_command(label="Save Simulation", command=self.save_sim)
         filemenu.add_separator()
+        filemenu.add_command(label="Save Forecast", command=self.save_forecast)
+        filemenu.add_command(label="Load Forecast", command=self.load_forecast)
+        filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=filemenu)
         self.config(menu=menubar)
@@ -51,23 +56,26 @@ class Application(tk.Tk):
         self.tab_analysis = ttk.Frame(self.notebook)
         self.tab_advanced = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
-
-        tabs = [(self.tab_control, "Simulation"),
-                (self.tab_heatmap, "Heatmap"),
-                (self.tab_3d, "3D Trajectory"),
-                (self.tab_analysis, "Analysis"),
-                (self.tab_advanced, "Advanced Config"),
-                (self.tab_log, "Log")]
+        self.tab_movie = ttk.Frame(self.notebook)
+        tabs = [
+            (self.tab_control, "Simulation"),
+            (self.tab_heatmap, "Heatmap"),
+            (self.tab_3d, "3D Trajectory"),
+            (self.tab_movie, "Movie Mode"),    # <<<<< NEW TAB
+            (self.tab_analysis, "Analysis"),
+            (self.tab_advanced, "Advanced Config"),
+            (self.tab_log, "Log"),
+        ]
         for tab, text in tabs:
             self.notebook.add(tab, text=text)
 
         self.create_control_tab()
         self.create_heatmap_tab()
         self.create_3d_tab()
+        self.create_movie_tab()
         self.create_analysis_tab()
         self.create_advanced_tab()
         self.create_log_tab()
-
 
     def create_control_tab(self):
         frame = self.tab_control
@@ -167,6 +175,193 @@ class Application(tk.Tk):
         nav = NavigationToolbar2Tk(self.traj_canvas, frame)
         nav.update()
         nav.pack(side='bottom', fill='x')
+        
+    def create_movie_tab(self):
+        frame = self.tab_movie
+
+        # Dropdowns for PID selection
+        control_row = ttk.Frame(frame)
+        control_row.pack(side='top', fill='x', padx=5, pady=3)
+
+        ttk.Label(control_row, text="Primary PID:").pack(side='left')
+        self.selected_movie_primary = tk.StringVar()
+        self.movie_primary_combobox = ttk.Combobox(
+            control_row, textvariable=self.selected_movie_primary, state='readonly'
+        )
+        self.movie_primary_combobox.pack(side='left', padx=(0, 10))
+        self.movie_primary_combobox.state(['disabled'])
+        self.movie_primary_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_movie_primary())
+
+        ttk.Label(control_row, text="Delta Ray PID:").pack(side='left')
+        self.selected_movie_delta = tk.StringVar()
+        self.movie_delta_combobox = ttk.Combobox(
+            control_row, textvariable=self.selected_movie_delta, state='readonly'
+        )
+        self.movie_delta_combobox.pack(side='left')
+        self.movie_delta_combobox.state(['disabled'])
+        self.movie_delta_combobox.bind('<<ComboboxSelected>>', lambda e: self._update_movie_delta())
+
+        # 3D Figure
+        self.movie_fig = Figure(figsize=(5, 5))
+        self.movie_ax = self.movie_fig.add_subplot(111, projection='3d')
+        self.movie_canvas = FigureCanvasTkAgg(self.movie_fig, master=frame)
+        self.movie_canvas.get_tk_widget().pack(fill='both', expand=True)
+        nav = NavigationToolbar2Tk(self.movie_canvas, frame)
+        nav.update()
+        nav.pack(side='bottom', fill='x')
+
+        # Movie controls
+        movie_frame = ttk.Frame(frame)
+        movie_frame.pack(side='bottom', fill='x', padx=8, pady=4)
+        self.movie_playing = False
+        self.movie_frame_idx = 0
+
+        self.btn_play = ttk.Button(movie_frame, text="Play", width=7, command=self._movie_play)
+        self.btn_pause = ttk.Button(movie_frame, text="Pause", width=7, command=self._movie_pause)
+        self.btn_rewind = ttk.Button(movie_frame, text="Rewind", width=7, command=self._movie_rewind)
+        self.movie_slider = ttk.Scale(movie_frame, from_=0, to=0, orient='horizontal', command=self._movie_slider_move)
+
+        self.btn_play.pack(side='left')
+        self.btn_pause.pack(side='left', padx=4)
+        self.btn_rewind.pack(side='left', padx=4)
+        self.movie_slider.pack(side='left', fill='x', expand=True, padx=(10,0))
+
+    def _populate_movie_primary_dropdown(self):
+        # Like _populate_primary_pid_dropdown, but for movie mode
+        all_pids = {}
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for streak in bin:
+                    _, pid, *_ = streak
+                    if (pid & ((1<<14)-1)) == 0:
+                        all_pids[pid] = self.sim.decode_pid(pid)
+        items = sorted(all_pids.items(), key=lambda x: x[1])
+        self.movie_primaries_list = items
+        self.movie_primary_combobox['values'] = [v for k,v in items]
+        if items:
+            self.selected_movie_primary.set(items[0][1])
+            self.movie_primary_combobox.state(['!disabled'])
+            self._update_movie_primary()
+        else:
+            self.selected_movie_primary.set('')
+            self.movie_primary_combobox.state(['disabled'])
+            self.movie_delta_combobox['values'] = []
+            self.movie_delta_combobox.set('')
+            self.movie_delta_combobox.state(['disabled'])
+
+    def _update_movie_primary(self):
+        selection = self.selected_movie_primary.get()
+        pid_int = None
+        for k, v in self.movie_primaries_list:
+            if v == selection:
+                pid_int = k
+                break
+        if pid_int is None:
+            self.movie_delta_combobox['values'] = []
+            self.movie_delta_combobox.set('')
+            self.movie_delta_combobox.state(['disabled'])
+            self._movie_clear()
+            return
+
+        # Find all delta rays
+        children = []
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for stk in bin:
+                    _, pid, *_ = stk
+                    if ((pid >> (11+14)) == (pid_int >> (11+14)) and
+                        ((pid >> 14) & ((1<<11)-1)) == ((pid_int >> 14) & ((1<<11)-1)) and
+                        (pid & ((1<<14)-1)) > 0):
+                        children.append((pid, self.sim.decode_pid(pid)))
+        children = sorted(children, key=lambda x: x[1])
+        self.movie_delta_children = children
+        self.movie_delta_combobox['values'] = [c[1] for c in children]
+        if children:
+            self.movie_delta_combobox.state(['!disabled'])
+            self.selected_movie_delta.set(children[0][1])
+        else:
+            self.movie_delta_combobox.state(['disabled'])
+            self.selected_movie_delta.set('')
+        # Show the selected streak by default
+        streak = self._find_streak_by_pid(pid_int)
+        if streak:
+            positions = streak[0]
+            if positions and len(positions) > 1:
+                self._setup_movie_controls(positions, which='movie')
+
+    def _update_movie_delta(self):
+        selection = self.selected_movie_delta.get()
+        pid_int = None
+        for k, v in self.movie_delta_children:
+            if v == selection:
+                pid_int = k
+                break
+        if pid_int is not None:
+            streak = self._find_streak_by_pid(pid_int)
+            if streak:
+                positions = streak[0]
+                if positions and len(positions) > 1:
+                    self._setup_movie_controls(positions, which='movie')
+
+    def _movie_clear(self):
+        self.movie_ax.clear()
+        self.movie_canvas.draw()
+
+    def _setup_movie_controls(self, positions, which='movie'):
+        # For which='movie', use self.movie_ax etc
+        if which == 'movie':
+            self._movie_positions = positions
+            self.movie_frame_idx = 0
+            self.movie_slider.config(to=len(positions)-1)
+            self.movie_slider.set(0)
+            self.movie_playing = False
+            self._movie_draw_frame(0)
+
+    def _movie_draw_frame(self, idx):
+        positions = getattr(self, '_movie_positions', None)
+        if not positions:
+            return
+        positions = self._movie_positions
+        idx = int(idx)
+        xs, ys, zs = zip(*positions[:idx+1])
+        self.movie_ax.clear()
+        self.movie_ax.plot(xs, ys, zs, '-o', color='royalblue', markersize=3)
+        self.movie_ax.scatter([xs[-1]], [ys[-1]], [zs[-1]], color='red', s=40, zorder=10)
+        self.movie_ax.set_xlabel("X (μm)")
+        self.movie_ax.set_ylabel("Y (μm)")
+        self.movie_ax.set_zlabel("Z (μm)")
+        self.movie_ax.set_title("Movie Mode: Step %d/%d" % (idx+1, len(positions)))
+        self.movie_ax.set_zlim(5, 0)
+        self.movie_canvas.draw()
+
+    def _movie_play(self):
+        if self.movie_playing: return
+        self.movie_playing = True
+        self._movie_animate()
+
+    def _movie_pause(self):
+        self.movie_playing = False
+
+    def _movie_rewind(self):
+        self.movie_playing = False
+        self.movie_frame_idx = 0
+        self.movie_slider.set(0)
+        self._movie_draw_frame(0)
+
+    def _movie_animate(self):
+        if not self.movie_playing: return
+        if self.movie_frame_idx < len(self._movie_positions)-1:
+            self.movie_frame_idx += 1
+            self.movie_slider.set(self.movie_frame_idx)
+            self._movie_draw_frame(self.movie_frame_idx)
+            self.after(60, self._movie_animate)  # 60 ms per frame ~16 FPS
+        else:
+            self.movie_playing = False  # stop at the end
+
+    def _movie_slider_move(self, val):
+        idx = int(float(val))
+        self.movie_frame_idx = idx
+        self._movie_draw_frame(idx)
 
     def predict_flux(self):
         self.flux_button.config(state='disabled')
@@ -247,20 +442,35 @@ class Application(tk.Tk):
             avg_particles.append(np.mean(counts))
             std_particles.append(np.std(counts))
             all_particles.append(counts)
+        self._last_flux_dates = np.array(reference_dates)
+        self._last_flux_avg = np.array(avg_particles)
+        self._last_flux_std = np.array(std_particles)
+        self._last_flux_all = np.array(all_particles)
+        self._last_flux_meta = dict(grid_size=grid_size, dt=exposure_time,
+                                    species_index=1, species_label="Hydrogen")
 
         # For plotting, use real_date
         real_dates = [rd for rd, _ in reference_dates]
         self.after(0, self._plot_flux_results, real_dates, avg_particles, std_particles)
         
-    def _plot_flux_results(self, dates, avg_particles, std_particles):
+    def _plot_flux_results(self, dates, avg_particles, std_particles, grid_size=None, dt=None, species=None):
         self.flux_fig = Figure(figsize=(5, 3), constrained_layout=True)
         self.flux_ax.clear()
+        # Always prefer meta info
+        if grid_size is None and hasattr(self, "_last_flux_meta"):
+            grid_size = self._last_flux_meta.get("grid_size", "")
+        if dt is None and hasattr(self, "_last_flux_meta"):
+            dt = self._last_flux_meta.get("dt", "")
+        if species is None and hasattr(self, "_last_flux_meta"):
+            species = self._last_flux_meta.get("species_label", "Hydrogen")
+
+        subtitle = f"Grid Size: {grid_size}x{grid_size} pixels, Exposure Time (dt): {dt} sec, Species: {species}+ ions"
         self.flux_ax.errorbar(
             dates, avg_particles, yerr=std_particles,
             fmt='o-', mfc='red', mec='black', ecolor='blue', alpha=0.75, capsize=3,
-            label=f'Avg count per date'
+            label='Avg count per date'
         )
-        if avg_particles:
+        if len(avg_particles) > 0:
             max_idx = int(np.argmax(avg_particles))
             max_date = dates[max_idx]
             max_value = avg_particles[max_idx]
@@ -271,14 +481,9 @@ class Application(tk.Tk):
                 ha='center')
         self.flux_ax.set_xlabel("Date")
         self.flux_ax.set_ylabel("Predicted H+ GCR Count")
-        self.flux_ax.set_title(f'Galactic Cosmic Ray Flux Forecast \n')
-        
-        grid_size = self.grid_size_var.get()
-        dt = self.dt_var.get()
-        species_name = self.sim.species_names.get(self.sim.species_index, f"Z={self.sim.Z_particle}")
-        subtitle = f"Grid Size: {grid_size}x{grid_size} pixels, Exposure Time (dt): {dt} sec, Species: {species_name}+ ions"
+        self.flux_ax.set_title('Galactic Cosmic Ray Flux Forecast', pad=18)
         # Add subtitle just below the main title using ax.text
-        self.flux_ax.text(0.5, 1.02, subtitle, ha='center',va='bottom', fontsize='medium', transform=self.flux_ax.transAxes)
+        self.flux_ax.text(0.5, 1.02, subtitle, ha='center', va='bottom', fontsize='medium', transform=self.flux_ax.transAxes)
         self.flux_ax.legend()
         self.flux_canvas.draw()
         self.flux_button.config(state='normal')
@@ -454,8 +659,6 @@ class Application(tk.Tk):
         plot_frame.pack(fill='both', expand=True, padx=10, pady=2)
 
         # Energy loss plot
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
         self.energy_fig = Figure(figsize=(4,2.2))
         self.energy_ax = self.energy_fig.add_subplot(111)
         self.energy_canvas = FigureCanvasTkAgg(self.energy_fig, master=plot_frame)
@@ -510,6 +713,7 @@ class Application(tk.Tk):
         self._display_results()
         self.after(0, self._populate_primary_pid_dropdown)
         self.after(0, self._populate_analysis_primary_dropdown)
+        self.after(0, self._populate_movie_primary_dropdown)
         messagebox.showinfo('Loaded', f'Simulation loaded from {f}')
         
     def save_sim(self):
@@ -531,6 +735,79 @@ class Application(tk.Tk):
             gcr_counts = [(sp_name, gcr_counts)]
         self.sim.save_sim(self.current_heatmap, self.current_streaks, gcr_counts, f)
         messagebox.showinfo('Saved', f'Simulation saved to {f}')
+
+    def save_forecast(self):
+        # Prompt for file location
+        fpath = filedialog.asksaveasfilename(
+            defaultextension='.h5',
+            filetypes=[('HDF5 files', '*.h5')],
+            title="Save Flux Forecast as HDF5"
+        )
+        if not fpath:
+            return
+
+        # These should be set at the end of _predict_flux_worker and _plot_flux_results
+        try:
+            dates = self._last_flux_dates
+            # If dates is a list of pairs/tuples/2D array:
+            dates_for_save = np.array(dates)
+            # Store the whole array if you want both, but for plotting, you'll use only the first column
+            with h5py.File(fpath, "w") as f:
+                f.create_dataset("dates", data=dates_for_save)
+            avg_particles = self._last_flux_avg
+            std_particles = self._last_flux_std
+            all_particles = self._last_flux_all
+            grid_size = self.grid_size_var.get()
+            dt = self.dt_var.get()
+            species = getattr(self.sim, 'species_label', 'unknown')
+        except Exception as e:
+            messagebox.showerror("Error", "No forecast data to save.\n\n" + str(e))
+            return
+
+        with h5py.File(fpath, "w") as f:
+            f.create_dataset("dates", data=dates)
+            f.create_dataset("avg_particles", data=avg_particles)
+            f.create_dataset("std_particles", data=std_particles)
+            f.create_dataset("all_particles", data=all_particles)
+            f.attrs["grid_size"] = grid_size
+            f.attrs["dt"] = dt
+            f.attrs["species_index"] = 1        # Always H
+            f.attrs["species_label"] = "Hydrogen"
+        messagebox.showinfo("Saved", f"Forecast saved to:\n{fpath}")
+
+    def load_forecast(self):
+        fpath = filedialog.askopenfilename(
+            filetypes=[('HDF5 files', '*.h5')],
+            title="Load Flux Forecast"
+        )
+        if not fpath:
+            return
+
+        with h5py.File(fpath, "r") as f:
+            dates = f["dates"][:]
+            avg_particles = f["avg_particles"][:]
+            std_particles = f["std_particles"][:]
+            all_particles = f["all_particles"][:]
+            grid_size = f.attrs.get("grid_size", None)
+            dt = f.attrs.get("dt", None)
+            species_label = f.attrs.get("species_label", "Hydrogen")  # Default to H if missing
+            species_index = f.attrs.get("species_index", 1)
+
+
+        # Check shape and extract first column if 2D
+        if dates.ndim == 2 and dates.shape[1] == 2:
+            plot_dates = dates[:, 0]
+        else:
+            plot_dates = dates
+
+        self._last_flux_dates = dates
+        self._last_flux_avg = avg_particles
+        self._last_flux_std = std_particles
+        self._last_flux_all = all_particles
+        self._last_flux_meta = dict(grid_size=grid_size, dt=dt,
+                                    species_index=species_index, species_label=species_label)
+        self._plot_flux_results(plot_dates, avg_particles, std_particles, grid_size, dt, species_label)
+        messagebox.showinfo("Loaded", f"Forecast loaded from:\n{fpath}")
 
     def run_sim(self):
         self.run_button.config(state='disabled')
@@ -572,7 +849,7 @@ class Application(tk.Tk):
         self.after(0, self.progress.config, {'style':'green.Horizontal.TProgressbar', 'value':maxv})
         self.after(0, self._populate_primary_pid_dropdown)
         self.after(0, self._populate_analysis_primary_dropdown)
-
+        self.after(0, self._populate_movie_primary_dropdown)
         
     def _populate_analysis_primary_dropdown(self):
         # Find all primary PIDs (delta_idx==0)
@@ -786,7 +1063,6 @@ class Application(tk.Tk):
                     idx = (pid >> (11+14)) & ((1<<7)-1)
                     lbl = self.sim.species_names.get(idx, f'Z={idx}')
                     if lbl not in legend_handles:
-                        from matplotlib.lines import Line2D
                         legend_handles[lbl] = Line2D([], [], color=col, label=lbl)
         if legend_handles:
             self.heatmap_ax.legend(
