@@ -9,6 +9,15 @@ import numpy as np
 import threading
 from GCRsim_v02f import CosmicRaySimulation
 
+def is_delta_of_primary(pid, primary_pid):
+    # True if pid is a delta ray of primary_pid
+    sp_pid  = (pid >> (11+14)) & ((1<<7)-1)
+    pr_pid  = (pid >> 14) & ((1<<11)-1)
+    delta   = pid & ((1<<14)-1)
+    sp_prim = (primary_pid >> (11+14)) & ((1<<7)-1)
+    pr_prim = (primary_pid >> 14) & ((1<<11)-1)
+    return (sp_pid, pr_pid) == (sp_prim, pr_prim) and delta > 0
+
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -28,7 +37,7 @@ class Application(tk.Tk):
         self.current_heatmap = None
         self.current_streaks = None
         self.current_count = None
-
+        self._current_movie_pid = None
         self.create_menu()
         self.create_widgets()
 
@@ -252,10 +261,15 @@ class Application(tk.Tk):
     def _update_movie_primary(self):
         selection = self.selected_movie_primary.get()
         pid_int = None
+        # Find the PID int for the selected label
         for k, v in self.movie_primaries_list:
             if v == selection:
                 pid_int = k
                 break
+
+        # Set the current movie PID, or clear if not found
+        self._current_movie_pid = pid_int
+
         if pid_int is None:
             self.movie_delta_combobox['values'] = []
             self.movie_delta_combobox.set('')
@@ -263,15 +277,17 @@ class Application(tk.Tk):
             self._movie_clear()
             return
 
-        # Find all delta rays
+        # Find all delta rays of this primary
         children = []
         for species in (self.current_streaks or []):
             for bin in species:
                 for stk in bin:
                     _, pid, *_ = stk
-                    if ((pid >> (11+14)) == (pid_int >> (11+14)) and
-                        ((pid >> 14) & ((1<<11)-1)) == ((pid_int >> 14) & ((1<<11)-1)) and
-                        (pid & ((1<<14)-1)) > 0):
+                    if (
+                        ((pid >> (11+14)) == (pid_int >> (11+14))) and
+                        (((pid >> 14) & ((1<<11)-1)) == ((pid_int >> 14) & ((1<<11)-1))) and
+                        ((pid & ((1<<14)-1)) > 0)
+                    ):
                         children.append((pid, self.sim.decode_pid(pid)))
         children = sorted(children, key=lambda x: x[1])
         self.movie_delta_children = children
@@ -318,20 +334,36 @@ class Application(tk.Tk):
             self._movie_draw_frame(0)
 
     def _movie_draw_frame(self, idx):
-        positions = getattr(self, '_movie_positions', None)
-        if not positions:
-            return
-        positions = self._movie_positions
+        primary_positions = self._movie_positions  # (Already selected)
         idx = int(idx)
-        xs, ys, zs = zip(*positions[:idx+1])
+        xs, ys, zs = zip(*primary_positions[:idx+1])
         self.movie_ax.clear()
-        self.movie_ax.plot(xs, ys, zs, '-o', color='royalblue', markersize=3)
+        # Draw primary
+        self.movie_ax.plot(xs, ys, zs, '-o', color='royalblue', markersize=3, label='Primary')
         self.movie_ax.scatter([xs[-1]], [ys[-1]], [zs[-1]], color='red', s=40, zorder=10)
+
+        # --- Draw all associated delta rays
+        primary_pid = self._current_movie_pid  # You'll need to track this on selection
+        # Find all delta rays for this primary
+        for species in (self.current_streaks or []):
+            for bin in species:
+                for streak in bin:
+                    positions, pid, *rest = streak
+                    if is_delta_of_primary(pid, primary_pid):
+                        # Optionally: determine at which primary step this delta is created (emission_step)
+                        # For now, just draw all, up to current idx
+                        n_draw = min(idx + 1, len(positions))
+                        if n_draw > 1:
+                            dx, dy, dz = zip(*positions[:n_draw])
+                            self.movie_ax.plot(dx, dy, dz, '-', color='orange', alpha=0.6, label='Delta' if 'Delta' not in self.movie_ax.get_legend_handles_labels()[1] else None)
+                            self.movie_ax.scatter([dx[-1]], [dy[-1]], [dz[-1]], color='gold', s=20, zorder=9)
+
         self.movie_ax.set_xlabel("X (μm)")
         self.movie_ax.set_ylabel("Y (μm)")
         self.movie_ax.set_zlabel("Z (μm)")
-        self.movie_ax.set_title("Movie Mode: Step %d/%d" % (idx+1, len(positions)))
+        self.movie_ax.set_title(f"Movie Mode: Step {idx+1}/{len(primary_positions)}")
         self.movie_ax.set_zlim(5, 0)
+        self.movie_ax.legend()
         self.movie_canvas.draw()
 
     def _movie_play(self):
