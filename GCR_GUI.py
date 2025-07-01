@@ -40,6 +40,9 @@ class Application(tk.Tk):
         self._current_movie_pid = None
         self.create_menu()
         self.create_widgets()
+        self.create_menu()
+        self._ensure_sim()
+        self.plot_wolf_number()
 
     def create_menu(self):
         menubar = tk.Menu(self)
@@ -135,14 +138,21 @@ class Application(tk.Tk):
         self.flux_progress.pack(side='top', fill='x', padx=5, pady=(2,8))
         self.flux_progress["mode"] = "determinate"
 
-        self.flux_fig = Figure(figsize=(5,2.2), tight_layout=True)
+        self.flux_fig = Figure(figsize=(5,2), tight_layout=True)
         self.flux_ax = self.flux_fig.add_subplot(111)
         self.flux_canvas = FigureCanvasTkAgg(self.flux_fig, master=frame)
         self.flux_canvas.get_tk_widget().pack(fill='x', padx=10, pady=(10, 5))
-        # Add navigation toolbar for interactivity
         self.flux_nav = NavigationToolbar2Tk(self.flux_canvas, frame)
         self.flux_nav.update()
         self.flux_nav.pack(side='top', fill='x', padx=10, pady=(0, 3))
+        # --- Add Wolf Number Plot below GCR Flux Forecast ---
+        self.wolf_fig = Figure(figsize=(5, 2), tight_layout=True)
+        self.wolf_ax = self.wolf_fig.add_subplot(111)
+        self.wolf_canvas = FigureCanvasTkAgg(self.wolf_fig, master=frame)
+        self.wolf_canvas.get_tk_widget().pack(fill='x', padx=10, pady=(0, 8))
+        self.wolf_nav = NavigationToolbar2Tk(self.wolf_canvas, frame)
+        self.wolf_nav.update()
+        self.wolf_nav.pack(side='top', fill='x', padx=10, pady=(0, 3))
 
     def create_heatmap_tab(self):
         fig = Figure(figsize=(5,5))
@@ -1136,6 +1146,39 @@ class Application(tk.Tk):
             return
         self.angles_fig.savefig(fpath, dpi=150)
         messagebox.showinfo("Exported", f"Angles plot saved to:\n{fpath}")
+
+    def plot_wolf_number(self):
+        df = self.sim.historic_df
+        if df is None or df.empty:
+            self.wolf_ax.clear()
+            self.wolf_ax.set_title("No Wolf Number data loaded")
+            self.wolf_canvas.draw()
+            return
+
+        cycle_max = df.loc[df.groupby("solar_cycle")["mean"].idxmax()]
+        cycle_min = df.loc[df.groupby("solar_cycle")["mean"].idxmin()]
+
+        self.wolf_ax.clear()
+        self.wolf_ax.plot(df['date'], df['mean'], marker='o', linestyle='-', color='blue', alpha=0.25, label='Mean Wolf Number')
+
+        cycle_change_dates = [1996.624, 2008.958, 2019.958]
+        cycle_labels = ['Cycle 23 starts', 'Cycle 24 starts', 'Cycle 25 starts']
+        ymin, ymax = self.wolf_ax.get_ylim()
+        for x_val, label in zip(cycle_change_dates, cycle_labels):
+            self.wolf_ax.axvline(x=x_val, color='red', linestyle='--', linewidth=2)
+            self.wolf_ax.text(x_val, ymax - 0.05 * (ymax - ymin), label, rotation=90, color='red',
+                            verticalalignment='top', horizontalalignment='right')
+
+        self.wolf_ax.scatter(cycle_max['date'], cycle_max['mean'], color='green', s=60, marker='*', label='Cycle Max')
+        self.wolf_ax.scatter(cycle_min['date'], cycle_min['mean'], color='orange', s=60, marker='D', label='Cycle Min')
+
+        self.wolf_ax.set_xlabel('Date')
+        self.wolf_ax.set_ylabel('Mean Wolf Number')
+        self.wolf_ax.set_title('Wolf Number (Sunspot Number) History')
+        self.wolf_ax.legend()
+        self.wolf_ax.grid(True)
+        self.wolf_fig.tight_layout()
+        self.wolf_canvas.draw()
 
     def _get_current_analysis_streak(self):
         # Helper to get currently displayed streak (primary or delta)
