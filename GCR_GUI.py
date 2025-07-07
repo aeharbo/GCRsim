@@ -1,3 +1,5 @@
+from datetime import datetime
+import os
 import tkinter as tk
 import h5py
 from tkinter import ttk, filedialog, messagebox
@@ -112,8 +114,7 @@ class Application(tk.Tk):
         btns.grid(row=5, column=0, columnspan=2, pady=(8, 2), sticky='w')
         self.run_button = ttk.Button(btns, text="Run", command=self.run_sim)
         self.run_button.pack(side='left', padx=(0, 2))
-        ttk.Button(btns, text="Pause", command=self.pause_sim).pack(side='left', padx=(0, 2))
-        ttk.Button(btns, text="Stop", command=self.stop_sim).pack(side='left', padx=(0, 6))
+        ttk.Button(btns, text="Export Energy Depositions", command=self._export_energy_depositions).pack(side='left', padx=(0, 6))
         self.progress = ttk.Progressbar(btns, orient='horizontal', length=200)
         self.progress.pack(side='left', padx=5)
         
@@ -1146,6 +1147,37 @@ class Application(tk.Tk):
             return
         self.angles_fig.savefig(fpath, dpi=150)
         messagebox.showinfo("Exported", f"Angles plot saved to:\n{fpath}")
+        
+        
+    def _export_energy_depositions(self):
+        # Check that you have streaks to export
+        if self.current_streaks is None or not self.current_streaks:
+            messagebox.showwarning("No Data", "No simulation data to export.")
+            return
+
+        # Compose default file name
+        current_date = datetime.now()
+        computer_friendly_date = current_date.strftime("%Y%m%d%H%M")
+        default_file_name = computer_friendly_date + '_energy_loss.csv'
+
+        # Ask where to save
+        fpath = filedialog.asksaveasfilename(
+            initialfile=default_file_name,
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv")],
+            title="Save Energy Deposition Data"
+        )
+        if not fpath:
+            return
+
+        try:
+            self._ensure_sim()  # Just in case
+            # Call the CosmicRaySimulation method you fixed earlier
+            self.sim.build_energy_loss_csv(self.current_streaks, fpath)
+            messagebox.showinfo("Exported", f"Energy deposition data saved to:\n{fpath}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export energy depositions:\n{str(e)}")
+        
 
     def plot_wolf_number(self):
         df = self.sim.historic_df
@@ -1208,9 +1240,6 @@ class Application(tk.Tk):
             self.traj_canvas.draw()
         except:
             pass
-
-    def pause_sim(self): pass
-    def stop_sim(self): pass
 
 if __name__ == "__main__":
     Application().mainloop()
