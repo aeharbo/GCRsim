@@ -1059,18 +1059,43 @@ class CosmicRaySimulation:
                 # Energy loss for primary particle
                 dE_dx = self.dEdx_primary(current_energy)
                 dE = dE_dx * s_cm
-
+                T_delta = 0.0
                 # --- Delta ray production ---
                 T_min = 0.001  # 1 keV in MeV
                 T_max_val = self.Tmax_primary(current_energy)
-                # Here we assume a modulating function g(T)=1.
-                T_vals = np.logspace(np.log10(T_min), np.log10(T_max_val), 1000)
-                integrand = 1.0 / T_vals**2
-                integral_value = np.trapz(integrand, T_vals) # chagned "trapz" to trapezoid to remove deprecation error in Zac's Code
-                delta_N = ((self.K * self.material_Z * self.Z_particle**2) /
-                        (self.material_A * (self.beta(current_energy, self.M))**2)) * (1/T_min**2) * integral_value * s_cm
+                if T_max_val > current_energy:
+                    T_max_val = current_energy
 
+                if T_max_val <= T_min:
+                    delta_N = 0  # Avoid issues if Tmax is invalid
+                else:
+                    num_points = 1000
+                    T_vals = np.logspace(np.log10(T_min), np.log10(T_max_val), num_points)
+                    dT_vals = np.diff(T_vals)
+                    T_centers = (T_vals[:-1] + T_vals[1:]) / 2
+                    K = self.K  # 0.307075 MeV*cm^2/g
+                    Z = self.material_Z
+                    A = self.material_A
+                    z = self.Z_particle
+                    beta = self.beta(current_energy, self.M)
+                    rho = self.material_density  # g/cm^3
+                    s_cm = self.step_size * 1e-4  # cm
+                    # For each step, in your delta ray integral:
+                    E_tot = current_energy + self.M  # total energy (MeV)
+                    g_T = 1 - (beta**2 * T_centers / T_max_val) + (T_centers**2) / (2 * E_tot**2)
+                    g_T = np.maximum(g_T, 0)
+                    integrand = np.where(g_T > 0, g_T / T_centers**2, 0)
+                    integral_value = np.sum(integrand * dT_vals)
+
+                    delta_N = (K/2) * (Z/A) * (z**2 / beta**2) * integral_value * rho * s_cm
+                    if delta_N > 1:
+                        print(f"WARNING: delta_N unusually high: delta_N={delta_N:.3f}\n at E={current_energy:.2f} MeV, T_max={T_max_val:.2f}, PID={self.decode_pid(PID)}") #debug print
+                        delta_N = 1  #maybe, if delta_N > 1, should we produce multiple delta rays?
+
+                #print(f"[Delta Ray Attempt] E={current_energy:.4g} T_max={T_max_val:.4g} delta_N={delta_N:.4g}") #debug print
+                
                 if np.random.uniform(0, 1) < delta_N:
+                    #print(f"Delta ray produced, E={current_energy:.4g}, delta_N={delta_N:.4g}") #debug print
                     accepted = False
                     while not accepted:
                         x_inv = np.random.uniform(1/T_max_val, 1/T_min)
@@ -1226,6 +1251,78 @@ class CosmicRaySimulation:
         """Wrapper to call propagate_delta_rays under a lock."""
         with self._lock:
             self.propagate_delta_rays(heatmap, x, y, z, theta, phi, init_en, PID, streaks)
+
+
+    def build_energy_loss_csv(self, streaks_list, csv_filename):
+        """
+        For each unique PID in streaks_list, use self.get_positions_by_pid to pull out
+        the full trajectory positions and the list of energy‐change tuples, then
+        write one row per step to a CSV with columns:
+          PID, step, x, y, z, dE, delta_energy
+
+        Parameters
+        ----------
+        streaks_list : list
+            The full list of all streaks from a simulation run
+            (can be nested [species][primaries][streaks]).
+        csv_filename : str
+            Output filename for the CSV.
+        """
+        records = []
+        # 1) Find all unique PIDs present in the simulation
+        unique_pids = {
+            streak[1]
+            for group in streaks_list
+            for sublist in group
+            for streak in sublist
+        }
+
+        # 2) For each PID, extract trajectory and energy changes
+        for pid in unique_pids:
+            positions_lists, _, energy_change_lists = self.get_positions_by_pid(streaks_list, pid)
+            for positions, e_changes in zip(positions_lists, energy_change_lists):
+                for step_idx, ((x, y, z), (dE, delta)) in enumerate(zip(positions, e_changes)):
+                    records.append({
+                        'PID': pid,
+                        'step': step_idx,
+                        'x': x,
+                        'y': y,
+                        'z': z,
+                        'dE': dE,
+                        'delta_energy': delta
+                    })
+
+
+        # 3) Build DataFrame and write to CSV
+        df = pd.DataFrame.from_records(records,
+                                       columns=['PID', 'step', 'x', 'y', 'z', 'dE', 'delta_energy'])
+        df.to_csv(csv_filename, index=False)
+        print(f"Saved {len(df)} energy‐loss records to '{csv_filename}'")
+
+
+    def get_positions_by_pid(self, streaks_list, target_pid):
+        """
+        For a given PID, collect all (x, y, z) positions and energy-change tuples 
+        from every matching streak in streaks_list.
+
+        Returns
+        -------
+        positions_list: list of list of (x, y, z)
+            Each entry is a trajectory (list of positions) for one matching streak.
+        target_pid: int
+            The PID queried (returned for convenience).
+        en_changes_list: list of list of (dE, delta)
+            Each entry is the list of energy changes for one matching streak.
+        """
+        positions_list = []
+        en_changes_list = []
+        for streak_group in streaks_list:
+            for sublist in streak_group:
+                for streak in sublist:
+                    if streak[1] == target_pid:
+                        positions_list.append(streak[0])
+                        en_changes_list.append(streak[-7])
+        return positions_list, target_pid, en_changes_list
 
     # Define a mapping from species index to species name.
     species_names = {0: "e", 1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O", 9: "F", 10: "Ne", 11: "Na",
