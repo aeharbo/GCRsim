@@ -9,6 +9,7 @@ from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
 import numpy as np
 import threading
+import itertools
 from GCRsim_v02f import CosmicRaySimulation
 
 def is_delta_of_primary(pid, primary_pid):
@@ -41,7 +42,8 @@ class Application(tk.Tk):
         self.current_count = None
         self._current_movie_pid = None
         self.create_menu()
-        self.create_widgets()
+        self.create_widgets() 
+        self.create_histograms_tab()
         self.create_menu()
         self._ensure_sim()
         self.plot_wolf_number()
@@ -68,6 +70,7 @@ class Application(tk.Tk):
         self.tab_heatmap = ttk.Frame(self.notebook)
         self.tab_3d = ttk.Frame(self.notebook)
         self.tab_analysis = ttk.Frame(self.notebook)
+        self.tab_histogram = ttk.Frame(self.notebook)
         self.tab_advanced = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
         self.tab_movie = ttk.Frame(self.notebook)
@@ -77,6 +80,7 @@ class Application(tk.Tk):
             (self.tab_3d, "3D Trajectory"),
             (self.tab_movie, "Movie Mode"),    # <<<<< NEW TAB
             (self.tab_analysis, "Analysis"),
+            (self.tab_histogram, "Histograms"),
             (self.tab_advanced, "Advanced Config"),
             (self.tab_log, "Log"),
         ]
@@ -712,10 +716,6 @@ class Application(tk.Tk):
         self.angles_canvas = FigureCanvasTkAgg(self.angles_fig, master=plot_frame)
         self.angles_canvas.get_tk_widget().pack(side='left', fill='both', expand=True)
 
-
-    def create_advanced_tab(self):
-        ttk.Label(self.tab_advanced, text="Advanced configuration coming soon...").pack(pady=10)
-
     def create_log_tab(self):
         self.log_text = tk.Text(self.tab_log, wrap='none', height=10)
         self.log_text.pack(fill='both', expand=True)
@@ -757,6 +757,8 @@ class Application(tk.Tk):
         self.after(0, self._populate_primary_pid_dropdown)
         self.after(0, self._populate_analysis_primary_dropdown)
         self.after(0, self._populate_movie_primary_dropdown)
+        self._populate_hist_species_dropdown()
+        self.update_histogram()        
         messagebox.showinfo('Loaded', f'Simulation loaded from {f}')
         
     def save_sim(self):
@@ -850,6 +852,8 @@ class Application(tk.Tk):
         self._last_flux_meta = dict(grid_size=grid_size, dt=dt,
                                     species_index=species_index, species_label=species_label)
         self._plot_flux_results(plot_dates, avg_particles, std_particles, grid_size, dt, species_label)
+        self._populate_hist_species_dropdown()
+        self.update_histogram()
         messagebox.showinfo("Loaded", f"Forecast loaded from:\n{fpath}")
 
     def run_sim(self):
@@ -881,8 +885,8 @@ class Application(tk.Tk):
             self.current_heatmap, self.current_streaks, self.current_count = hm, streaks_all, sum(counts)
             self.after(0, self._update_heatmap, hm)
         else:
-            h, s, c = self.sim.run_sim()
-            self.current_heatmap, self.current_streaks, self.current_count = h, s, c
+            h, s, c = self.sim.run_sim(species_index=self.sim.species_index)
+            self.current_heatmap, self.current_streaks, self.current_count = h, [s], c
             self.after(0, self.progress.stop)
             self.after(0, lambda: self.progress.config(mode='determinate', value=self.progress['maximum']))
             self.after(0, self._update_heatmap, h)
@@ -893,6 +897,8 @@ class Application(tk.Tk):
         self.after(0, self._populate_primary_pid_dropdown)
         self.after(0, self._populate_analysis_primary_dropdown)
         self.after(0, self._populate_movie_primary_dropdown)
+        self._populate_hist_species_dropdown()
+        self.update_histogram()
         
     def _populate_analysis_primary_dropdown(self):
         # Find all primary PIDs (delta_idx==0)
@@ -1211,6 +1217,247 @@ class Application(tk.Tk):
         self.wolf_ax.grid(True)
         self.wolf_fig.tight_layout()
         self.wolf_canvas.draw()
+
+    def create_histograms_tab(self):
+        frame = self.tab_histogram
+        control_row = ttk.Frame(frame)
+        control_row.pack(side='top', fill='x', padx=5, pady=3)
+
+
+        # Controls for histogram selection
+        controls = ttk.Frame(frame)
+        controls.pack(side='top', fill='x', padx=6, pady=4)
+
+        ttk.Label(controls, text="Histogram:").pack(side='left')
+        self.histogram_type = tk.StringVar(value="Delta Ray Energies")
+        self.histogram_options = ["Delta Ray Energies", "Primary Energy Distribution"]
+        self.histogram_combobox = ttk.Combobox(
+            controls, textvariable=self.histogram_type, state='readonly',
+            values=self.histogram_options, width=28
+        )
+        self.histogram_combobox.pack(side='left', padx=(5,10))
+        self.histogram_combobox.bind('<<ComboboxSelected>>', lambda e: self.update_histogram())
+
+        # If you want to select species for primary energies (optional)
+        ttk.Label(controls, text="Species:").pack(side='left', padx=(10,0))
+        self.hist_species_var = tk.StringVar()
+        self.hist_species_combobox = ttk.Combobox(
+            controls, textvariable=self.hist_species_var, state='readonly', width=18
+        )
+        self.hist_species_combobox.pack(side='left')
+        self.hist_species_combobox.bind('<<ComboboxSelected>>', lambda e: self.update_histogram())
+
+        ttk.Button(controls, text="Export as PNG", command=self.export_histogram).pack(side='left', padx=(20,0))
+
+        # Matplotlib Figure for Histogram
+        self.hist_fig = Figure(figsize=(5, 4))
+        self.hist_ax = self.hist_fig.add_subplot(111)
+        self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=frame)
+        self.hist_canvas.get_tk_widget().pack(fill='both', expand=True)
+
+        # Initialize species dropdown
+        self._populate_hist_species_dropdown()
+        self.update_histogram()
+
+    def _populate_hist_species_dropdown(self):
+        # All species names available from sim
+        if not self.sim:
+            self.hist_species_combobox['values'] = []
+            self.hist_species_var.set('')
+            self.hist_species_combobox.state(['disabled'])
+            return
+        species_list = [self.sim.species_names[k] for k in sorted(self.sim.species_names.keys())]
+        self.hist_species_combobox['values'] = species_list
+        if species_list:
+            self.hist_species_var.set(species_list[0])
+            self.hist_species_combobox.state(['!disabled'])
+        else:
+            self.hist_species_var.set('')
+            self.hist_species_combobox.state(['disabled'])
+
+    def update_histogram(self):
+        # Clear previous
+        self.hist_ax.clear()
+        hist_type = self.histogram_type.get()
+        if hist_type == "Delta Ray Energies":
+            self.plot_delta_ray_energy_histogram()
+        elif hist_type == "Primary Energy Distribution":
+            self.plot_primary_energy_histogram()
+        self.hist_fig.tight_layout()
+        self.hist_canvas.draw()
+
+    def plot_delta_ray_energy_histogram(self):
+        # All streaks, all species
+        streaks = self.current_streaks
+        if not streaks:
+            self.hist_ax.set_title("No data loaded")
+            return
+        import itertools
+        delta_mask = (1 << 14) - 1
+        flat_streaks = list(itertools.chain.from_iterable(itertools.chain.from_iterable(streaks)))
+        delta_ray_energies = [st[13] for st in flat_streaks if (st[1] & delta_mask) > 0]
+        if not delta_ray_energies:
+            self.hist_ax.set_title("No delta rays found")
+            return
+        bins = np.logspace(np.log10(min(delta_ray_energies)), np.log10(max(delta_ray_energies)), 100)
+        fit = 1 / bins
+        self.hist_ax.hist(delta_ray_energies, bins=bins, color='orange', alpha=0.7, edgecolor='black', label="Delta Rays")
+        self.hist_ax.plot(bins, fit * (max(np.histogram(delta_ray_energies, bins=bins)[0]) / max(fit)), 'k--', label=r'$\propto 1/T$')
+        self.hist_ax.set_xscale('log')
+        self.hist_ax.set_yscale('log')
+        self.hist_ax.set_xlabel(r"Initial $\delta$ ray energy (MeV)")
+        self.hist_ax.set_ylabel(r"Count")
+        self.hist_ax.set_title(r"Histogram of $\delta$ ray initial energies")
+        self.hist_ax.legend()
+        self.hist_ax.grid(True, which="both", ls="--", alpha=0.7)
+
+    def plot_primary_energy_histogram(self):
+        # Pick species by combobox
+        streaks = self.current_streaks
+        if not streaks:
+            self.hist_ax.set_title("No data loaded")
+            return
+        selected_species = self.hist_species_var.get()
+        if not selected_species:
+            self.hist_ax.set_title("No species selected")
+            return
+
+        # Find the corresponding species index
+        idx = None
+        for k, v in self.sim.species_names.items():
+            if v == selected_species:
+                idx = k
+                break
+        if idx is None or idx >= len(streaks):
+            self.hist_ax.set_title("Species not found in loaded data")
+            return
+
+        # All primaries for this species
+        flat_streaks = list(itertools.chain.from_iterable(streaks[idx]))
+        primaries = [st for st in flat_streaks if (st[1] & ((1<<14)-1)) == 0]
+        primary_energies = [st[13] for st in primaries]
+        if not primary_energies:
+            self.hist_ax.set_title("No primaries found")
+            return
+        bins = np.logspace(np.log10(min(primary_energies)), np.log10(max(primary_energies)), 100)
+        self.hist_ax.hist(primary_energies, bins=bins, color='royalblue', alpha=0.8, edgecolor='black')
+        self.hist_ax.set_xscale('log')
+        self.hist_ax.set_xlabel("Primary Initial Energy (MeV)")
+        self.hist_ax.set_yscale('log')
+        self.hist_ax.set_ylabel("Count")
+        self.hist_ax.set_title(f"Primary Population vs. Initial Energy\nSpecies: {selected_species}")
+        self.hist_ax.grid(True, which="both", ls="--", alpha=0.7)
+
+    def export_histogram(self):
+        fpath = filedialog.asksaveasfilename(defaultextension=".png",
+            filetypes=[('PNG Image','*.png')], title="Save histogram as PNG")
+        if not fpath:
+            return
+        self.hist_fig.savefig(fpath, dpi=150)
+        messagebox.showinfo("Exported", f"Histogram plot saved to:\n{fpath}")
+            
+    def create_advanced_tab(self):
+        frame = self.tab_advanced
+        # Clear frame if called multiple times
+        for w in frame.winfo_children():
+            w.destroy()
+
+        params = ttk.LabelFrame(frame, text="Advanced Simulation Parameters")
+        params.pack(side='top', fill='x', padx=10, pady=10)
+
+        self._ensure_sim()
+        species_names = [self.sim.species_names[k] for k in sorted(self.sim.species_names.keys())]
+        ttk.Label(params, text="Species:").grid(row=0, column=0, sticky='e')
+        self.adv_species_var = tk.StringVar()
+        self.adv_species_combobox = ttk.Combobox(params, textvariable=self.adv_species_var, state='readonly')
+        self.adv_species_combobox['values'] = species_names
+        self.adv_species_combobox.grid(row=0, column=1, padx=4, pady=2)
+        if species_names:
+            self.adv_species_var.set(species_names[0])
+
+        # Grid size
+        ttk.Label(params, text="Grid Size:").grid(row=1, column=0, sticky='e')
+        self.adv_grid_size_var = tk.IntVar(value=4088)
+        ttk.Entry(params, textvariable=self.adv_grid_size_var, width=10).grid(row=1, column=1, padx=4, pady=2)
+
+        # dt
+        ttk.Label(params, text="Exposure Time (dt):").grid(row=2, column=0, sticky='e')
+        self.adv_dt_var = tk.DoubleVar(value=3.4)
+        ttk.Entry(params, textvariable=self.adv_dt_var, width=10).grid(row=2, column=1, padx=4, pady=2)
+
+        # date
+        ttk.Label(params, text="Date (fractional year):").grid(row=3, column=0, sticky='e')
+        self.adv_date_var = tk.DoubleVar(value=2026.123)
+        ttk.Entry(params, textvariable=self.adv_date_var, width=10).grid(row=3, column=1, padx=4, pady=2)
+
+        # max_workers
+        ttk.Label(params, text="Max Workers:").grid(row=4, column=0, sticky='e')
+        self.adv_max_workers_var = tk.IntVar(value=4)
+        ttk.Entry(params, textvariable=self.adv_max_workers_var, width=10).grid(row=4, column=1, padx=4, pady=2)
+
+        # Progress Bar
+        self.adv_progress = ttk.Progressbar(params, orient='horizontal', length=200, mode='determinate')
+        self.adv_progress.grid(row=5, columnspan=2, pady=8)
+        self.adv_progress['maximum'] = 100  # Set default; will update during run
+
+        # Dedicated Run button
+        self.adv_run_btn = ttk.Button(frame, text="Run Simulation", command=self.run_advanced_sim)
+        self.adv_run_btn.pack(pady=15)
+
+    def run_advanced_sim(self):
+        species_index = self._get_selected_advanced_species_index()
+        if species_index is None:
+            messagebox.showerror("Error", "Please select a valid species.")
+            return
+
+        self.adv_progress.config(mode='indeterminate')
+        self.adv_progress.start(10)
+        self.adv_run_btn.config(state='disabled')
+
+        # Pass species_index directly!
+        threading.Thread(target=self._run_advanced_sim_thread, args=(species_index,), daemon=True).start()
+
+    def _run_advanced_sim_thread(self, species_index):
+        if species_index is None:
+            self.after(0, lambda: messagebox.showerror("Error", "Please select a valid species."))
+            self.after(0, lambda: self.adv_run_btn.config(state='normal'))
+            return
+
+        # Get simulation parameters from UI
+        grid = self.adv_grid_size_var.get()
+        dt = self.adv_dt_var.get()
+        date = self.adv_date_var.get()
+        maxw = self.adv_max_workers_var.get()
+        self.sim = CosmicRaySimulation(
+            species_index=species_index, grid_size=grid, dt=dt, date=date, progress_bar=True, max_workers=maxw
+        )
+
+        # Start the progress bar in indeterminate mode
+        self.after(0, lambda: self.adv_progress.config(mode='indeterminate'))
+        self.after(0, self.adv_progress.start)
+
+        # Run the simulation
+        h, s, c = self.sim.run_sim(species_index=species_index)
+        self.current_heatmap, self.current_streaks, self.current_count = h, [s], c
+
+        # After sim finishes...
+        self.after(0, self.adv_progress.stop)
+        self.after(0, lambda: self.adv_progress.config(mode='determinate', value=100, style="green.Horizontal.TProgressbar"))
+        self.after(0, lambda: self.adv_run_btn.config(state='normal'))
+        self.after(0, self._update_heatmap, h)
+        self.after(0, self._display_results)
+        self.after(0, self._populate_primary_pid_dropdown)
+        self.after(0, self._populate_analysis_primary_dropdown)
+        self.after(0, self._populate_movie_primary_dropdown)
+        self._populate_hist_species_dropdown()
+        self.update_histogram()
+
+    def _get_selected_advanced_species_index(self):
+        species_name = self.adv_species_var.get()
+        for k, v in self.sim.species_names.items():
+            if v == species_name:
+                return k
+        return None
 
     def _get_current_analysis_streak(self):
         # Helper to get currently displayed streak (primary or delta)
