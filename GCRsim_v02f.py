@@ -458,7 +458,7 @@ class CosmicRaySimulation:
         self._lock = threading.Lock()  
     @classmethod
     def run_full_sim(cls,
-                        grid_size: int = 4096,
+                        grid_size: int = 4088,
                         progress_bar: bool = False,
                         **sim_kwargs):
         """
@@ -1167,7 +1167,7 @@ class CosmicRaySimulation:
         species_idx = (PID >> (11 + 14)) & ((1 << 7) - 1)
         return self.color_list[species_idx][1]
     
-    def run_sim(self):
+    def run_sim(self, species_index=None):
         """
         Run the simulation for a given number of primary events.
         For each event, a Poisson draw determines the number of primary cosmic rays.
@@ -1176,6 +1176,11 @@ class CosmicRaySimulation:
           heatmap: 2D numpy array of pixel counts.
           streaks: list of tuples recording position and energy loss details for each particle (by PID).
         """        
+        if species_index is not None:
+            idx = species_index
+        else:
+            idx = self.species_index
+
         num_pixels = self.grid_size
         heatmap = np.zeros((num_pixels, num_pixels), dtype=int)
 
@@ -1188,21 +1193,20 @@ class CosmicRaySimulation:
         for iE in range(len(kin_energies)):
             E = kin_energies[iE]
             delta_E = delta_energies[iE]
-            R = self.rigidity(E, self.A_list[self.species_index], self.Z_particle, self.m_list[self.species_index])
+            R = self.rigidity(E, self.A_list[idx], self.Z_list[idx], self.m_list[idx])
             R0 = self.compute_R0(self.date, R)
-            beta = self.relative_velocity(E, self.m_list[self.species_index])
-            g_val = self.gamma_func(R, self.species_index)
-            D = self.Delta(self.Z_particle, beta, R, R0)  
-        
-            ln_phi = self.log_rigidity_spectrum(self.alpha_list[self.species_index], beta, g_val, self.C_list[self.species_index], R, D, R0)
+            beta = self.relative_velocity(E, self.m_list[idx])
+            g_val = self.gamma_func(R, idx)
+            D = self.Delta(self.Z_list[idx], beta, R, R0)
+            ln_phi = self.log_rigidity_spectrum(self.alpha_list[idx], beta, g_val, self.C_list[idx], R, D, R0)
             phi_val = np.exp(ln_phi)
             if not np.isfinite(phi_val) or phi_val <= 0:
                 phi_val = 0.0
-        
-            delta_R = self.delta_rigidity(E, delta_E, self.A_list[self.species_index], self.Z_particle, self.m_list[self.species_index])
+
+            delta_R = self.delta_rigidity(E, delta_E, self.A_list[idx], self.Z_list[idx], self.m_list[idx])
             product = phi_val * delta_R * self.dOmega * self.dt * self.dA
             product_values.append(product)
-        
+            
         product_values = np.array(product_values)
         product_values[product_values <= 0] = np.nan
         
@@ -1229,20 +1233,18 @@ class CosmicRaySimulation:
             primary_gcr_count += count
             if count == 0:
                 continue
-    
+
             E_min = num_part_table['Start Energy (eV)'].iat[j]
             E_max = num_part_table['End Energy (eV)'].iat[j]
-            streaks = []  # list to hold streaks for this energy bin
-    
+            streaks = []
             for _ in range(count):
                 x = np.random.randint(0, num_pixels)
                 y = np.random.randint(0, num_pixels)
                 init_en = np.random.uniform(E_min, E_max)
-                theta, phi, vel = self.generate_angles(init_en, self.m_list[self.species_index])
-                # Encode a unique PID: use primary_counter as the unique primary index and 0 for delta_idx.
-                encoded_PID = CosmicRaySimulation.encode_pid(self.species_index, primary_counter, 0)
-                primary_counter += 1  # Increment the counter for the next primary
-                self.propagate_GCR(heatmap, x, y, theta, phi, init_en*1e-6, encoded_PID, streaks) #init_en converted from eV to MeV
+                theta, phi, vel = self.generate_angles(init_en, self.m_list[idx])
+                encoded_PID = CosmicRaySimulation.encode_pid(idx, primary_counter, 0)
+                primary_counter += 1
+                self.propagate_GCR(heatmap, x, y, theta, phi, init_en*1e-6, encoded_PID, streaks)
             species_streaks.append(streaks)
         
         return heatmap, species_streaks, primary_gcr_count
