@@ -1410,7 +1410,6 @@ class Application(tk.Tk):
         control_row = ttk.Frame(frame)
         control_row.pack(side='top', fill='x', padx=5, pady=3)
 
-
         # Controls for histogram selection
         controls = ttk.Frame(frame)
         controls.pack(side='top', fill='x', padx=6, pady=4)
@@ -1422,18 +1421,20 @@ class Application(tk.Tk):
             controls, textvariable=self.histogram_type, state='readonly',
             values=self.histogram_options, width=28
         )
+        
+        self.hist_species_var = tk.StringVar()
+
         self.histogram_combobox.pack(side='left', padx=(5,10))
         self.histogram_combobox.bind('<<ComboboxSelected>>', lambda e: self.update_histogram())
 
-        # If you want to select species for primary energies (optional)
+        # If you want to select species for primary energies
         ttk.Label(controls, text="Species:").pack(side='left', padx=(10,0))
-        self.hist_species_var = tk.StringVar()
         self.hist_species_combobox = ttk.Combobox(
             controls, textvariable=self.hist_species_var, state='readonly', width=18
         )
         self.hist_species_combobox.pack(side='left')
         self.hist_species_combobox.bind('<<ComboboxSelected>>', lambda e: self.update_histogram())
-
+        self.hist_species_combobox.state(['disabled'])
         ttk.Button(controls, text="Export as PNG", command=self.export_histogram).pack(side='left', padx=(20,0))
 
         # Matplotlib Figure for Histogram
@@ -1447,29 +1448,43 @@ class Application(tk.Tk):
         self.update_histogram()
 
     def _populate_hist_species_dropdown(self):
-        # All species names available from sim
-        if not self.sim:
+        if not self.sim or not self.current_streaks:
             self.hist_species_combobox['values'] = []
             self.hist_species_var.set('')
             self.hist_species_combobox.state(['disabled'])
             return
-        species_list = [self.sim.species_names[k] for k in sorted(self.sim.species_names.keys())]
+
+        available_species_indices = [
+            i for i, streak in enumerate(self.current_streaks)
+            if streak and len(streak) > 0
+        ]
+        species_list = [self.sim.species_names[k] for k in available_species_indices]
         self.hist_species_combobox['values'] = species_list
-        if species_list:
-            self.hist_species_var.set(species_list[0])
-            self.hist_species_combobox.state(['!disabled'])
-        else:
-            self.hist_species_var.set('')
-            self.hist_species_combobox.state(['disabled'])
+        cur = self.hist_species_var.get()
+        if not cur or cur not in species_list:
+            if species_list:
+                self.hist_species_var.set(species_list[0])
+            else:
+                self.hist_species_var.set('')
 
     def update_histogram(self):
-        # Clear previous
         self.hist_ax.clear()
         hist_type = self.histogram_type.get()
+
         if hist_type == "Delta Ray Energies":
+            self.hist_species_combobox.state(['disabled'])
+            self.hist_species_var.set("All species")
             self.plot_delta_ray_energy_histogram()
         elif hist_type == "Primary Energy Distribution":
+            self._populate_hist_species_dropdown()
+            species_list = self.hist_species_combobox['values']
+            # Only enable if there is a valid species selection
+            if species_list:
+                self.hist_species_combobox.state(['!disabled'])
+            else:
+                self.hist_species_combobox.state(['disabled'])
             self.plot_primary_energy_histogram()
+
         self.hist_fig.tight_layout()
         self.hist_canvas.draw()
 
@@ -1498,7 +1513,6 @@ class Application(tk.Tk):
         self.hist_ax.grid(True, which="both", ls="--", alpha=0.7)
 
     def plot_primary_energy_histogram(self):
-        # Pick species by combobox
         streaks = self.current_streaks
         if not streaks:
             self.hist_ax.set_title("No data loaded")
@@ -1508,18 +1522,15 @@ class Application(tk.Tk):
             self.hist_ax.set_title("No species selected")
             return
 
-        # Find the corresponding species index
-        idx = None
-        for k, v in self.sim.species_names.items():
-            if v == selected_species:
-                idx = k
-                break
-        if idx is None or idx >= len(streaks):
-            self.hist_ax.set_title("Species not found in loaded data")
+        # Map dropdown directly to streaks index
+        species_list = self.hist_species_combobox['values']
+        try:
+            streaks_idx = species_list.index(selected_species)
+        except ValueError:
+            self.hist_ax.set_title("Species not found in current selection")
             return
 
-        # All primaries for this species
-        flat_streaks = list(itertools.chain.from_iterable(streaks[idx]))
+        flat_streaks = list(itertools.chain.from_iterable(streaks[streaks_idx]))
         primaries = [st for st in flat_streaks if (st[1] & ((1<<14)-1)) == 0]
         primary_energies = [st[13] for st in primaries]
         if not primary_energies:
