@@ -1,18 +1,19 @@
-from datetime import datetime
 import os
-import tkinter as tk
+import csv
 import h5py
+import threading
+import itertools
+import numpy as np
+import tkinter as tk
+from datetime import datetime
 from tkinter import ttk, filedialog, messagebox
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from matplotlib.colors import LogNorm
 from matplotlib.lines import Line2D
-import numpy as np
-import threading
-import itertools
+from matplotlib.patches import Circle
 from GCRsim_v02f import CosmicRaySimulation
 from electron_spread import process_electrons_to_DN
-
 
 def is_delta_of_primary(pid, primary_pid):
     # True if pid is a delta ray of primary_pid
@@ -269,11 +270,11 @@ class Application(tk.Tk):
         nav.pack(side='bottom', fill='x')
         btn_frame = ttk.Frame(self.tab_dnmap)
         btn_frame.pack(side='top', fill='x', padx=5, pady=5)
-        ttk.Button(btn_frame, text="Export DN Map as NPY", command=self.export_dnmap_npy).pack(side='left')
-        ttk.Button(btn_frame, text="Export DN Map as PNG", command=self.export_dnmap_png).pack(side='left')
-        btn_frame = ttk.Frame(self.tab_dnmap)
-        btn_frame.pack(side='top', fill='x', padx=5, pady=5)
-        ttk.Button(btn_frame, text="Load DN Map", command=self.load_dnmap).pack(side='left')
+        ttk.Button(btn_frame, text="Export DN Map as NPY", command=self.export_dnmap_npy).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="Export DN Map as PNG", command=self.export_dnmap_png).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="Load DN Map", command=self.load_dnmap).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="Highlight Affected Pixels", command=self.highlight_dn_pixels).pack(side='left', padx=2)
+        ttk.Button(btn_frame, text="Reset View", command=self._update_dnmap).pack(side='left', padx=2)
 
     def export_dnmap_npy(self):
         if self.current_dnmap is None:
@@ -380,9 +381,6 @@ class Application(tk.Tk):
                     self._setup_movie_controls(positions, which='movie')
 
     def load_dnmap(self):
-        from tkinter import filedialog, messagebox
-        import numpy as np
-
         fpath = filedialog.askopenfilename(
             filetypes=[('NumPy Array', '*.npy')],
             title="Load DN Map (.npy)"
@@ -716,16 +714,22 @@ class Application(tk.Tk):
                             ("" if show_all else f" > {delta_human}"))
         self.traj_ax.set_zlim(5, 0)
         self.traj_canvas.draw()
-
+        
     def _update_dnmap(self):
+        # Remove circles/patches and colorbar
+        if hasattr(self, '_dnmap_cb') and self._dnmap_cb:
+            try:
+                self._dnmap_cb.remove()
+            except Exception:
+                pass
+            self._dnmap_cb = None
+        self.dnmap_ax.clear()
+        
         if self.current_dnmap is None:
-            self.dnmap_ax.clear()
             self.dnmap_canvas.draw()
             return
 
         masked = np.ma.masked_invalid(self.current_dnmap)
-        # Use LogNorm for better visualization if range is large
-        from matplotlib.colors import LogNorm
         norm = LogNorm(
             vmin=np.nanmin(masked[masked > 0]) if np.any(masked > 0) else 1,
             vmax=np.nanmax(masked)
@@ -737,15 +741,60 @@ class Application(tk.Tk):
             norm=norm
         )
         im.cmap.set_bad(color='black')
-    # Draw or update colorbar with label
-        if not hasattr(self, '_dnmap_cb'):
-            self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
-        else:
-            self._dnmap_cb.update_normal(im)
-        self._dnmap_cb.set_label("Digital Number (DN)")
         self.dnmap_ax.set_title("Pixelated SCA image")
         self.dnmap_ax.set_xlabel("x (μm)")
-        self.dnmap_ax.set_ylabel("y (μm)")        
+        self.dnmap_ax.set_ylabel("y (μm)")
+        self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
+        self._dnmap_cb.set_label("Digital Number (DN)")
+        self.dnmap_canvas.draw()
+
+    def highlight_dn_pixels(self):
+        if hasattr(self, '_dnmap_cb') and self._dnmap_cb:
+            try:
+                self._dnmap_cb.remove()
+            except Exception:
+                pass
+            self._dnmap_cb = None
+        self.dnmap_ax.clear()
+
+        if self.current_dnmap is None:
+            self.dnmap_canvas.draw()
+            return
+
+        masked = np.ma.masked_invalid(self.current_dnmap)
+        grid_size = self.current_dnmap.shape[0]
+        extent = [0, grid_size, 0, grid_size ]
+        norm = LogNorm(
+            vmin=np.nanmin(masked[masked > 0]) if np.any(masked > 0) else 1,
+            vmax=np.nanmax(masked)
+        )
+        im = self.dnmap_ax.imshow(
+            masked,
+            cmap='gray',
+            origin='lower',
+            norm=norm,
+            extent=extent
+        )
+        im.cmap.set_bad(color='black')
+        self.dnmap_ax.set_xlabel("x (μm)")
+        self.dnmap_ax.set_ylabel("y (μm)")
+        self.dnmap_ax.set_title("Pixelated SCA image")
+        self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
+        self._dnmap_cb.set_label("Digital Number (DN)")
+
+        # Add circles around affected pixels
+        affected = np.argwhere(masked > 0)
+        for y_pix, x_pix in affected:
+            x_center = (x_pix + 0.5)
+            y_center = (y_pix + 0.5)
+            circle = Circle(
+                (x_center, y_center),
+                radius=0.5,
+                edgecolor='limegreen',
+                facecolor='none',
+                linewidth=1.4
+            )
+            self.dnmap_ax.add_patch(circle)
         self.dnmap_canvas.draw()
 
     def convert_to_dn_map(self):
@@ -1266,7 +1315,6 @@ class Application(tk.Tk):
             filetypes=[('CSV files','*.csv')], title="Save positions as CSV")
         if not fpath:
             return
-        import csv
         with open(fpath, "w", newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['Step', 'X (um)', 'Y (um)', 'Z (um)'])
@@ -1431,7 +1479,6 @@ class Application(tk.Tk):
         if not streaks:
             self.hist_ax.set_title("No data loaded")
             return
-        import itertools
         delta_mask = (1 << 14) - 1
         flat_streaks = list(itertools.chain.from_iterable(itertools.chain.from_iterable(streaks)))
         delta_ray_energies = [st[13] for st in flat_streaks if (st[1] & delta_mask) > 0]
