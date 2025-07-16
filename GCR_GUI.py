@@ -11,6 +11,8 @@ import numpy as np
 import threading
 import itertools
 from GCRsim_v02f import CosmicRaySimulation
+from electron_spread import process_electrons_to_DN
+
 
 def is_delta_of_primary(pid, primary_pid):
     # True if pid is a delta ray of primary_pid
@@ -47,6 +49,7 @@ class Application(tk.Tk):
         self.create_menu()
         self._ensure_sim()
         self.plot_wolf_number()
+        self.current_dnmap = None
 
     def create_menu(self):
         menubar = tk.Menu(self)
@@ -57,6 +60,9 @@ class Application(tk.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Save Forecast", command=self.save_forecast)
         filemenu.add_command(label="Load Forecast", command=self.load_forecast)
+        filemenu.add_separator()
+        filemenu.add_command(label="Convert CSV to DN Map", command=self.convert_to_dn_map)
+        filemenu.add_command(label="Load DN Map", command=self.load_dnmap)
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.quit)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -70,6 +76,7 @@ class Application(tk.Tk):
         self.tab_heatmap = ttk.Frame(self.notebook)
         self.tab_3d = ttk.Frame(self.notebook)
         self.tab_analysis = ttk.Frame(self.notebook)
+        self.tab_dnmap = ttk.Frame(self.notebook)
         self.tab_histogram = ttk.Frame(self.notebook)
         self.tab_advanced = ttk.Frame(self.notebook)
         self.tab_log = ttk.Frame(self.notebook)
@@ -78,8 +85,9 @@ class Application(tk.Tk):
             (self.tab_control, "Simulation"),
             (self.tab_heatmap, "Heatmap"),
             (self.tab_3d, "3D Trajectory"),
-            (self.tab_movie, "Movie Mode"),    # <<<<< NEW TAB
+            (self.tab_movie, "Movie Mode"),    
             (self.tab_analysis, "Analysis"),
+            (self.tab_dnmap, "Pixelated SCA"),
             (self.tab_histogram, "Histograms"),
             (self.tab_advanced, "Advanced Config"),
             (self.tab_log, "Log"),
@@ -92,6 +100,7 @@ class Application(tk.Tk):
         self.create_3d_tab()
         self.create_movie_tab()
         self.create_analysis_tab()
+        self.create_dnmap_tab()
         self.create_advanced_tab()
         self.create_log_tab()
 
@@ -249,6 +258,42 @@ class Application(tk.Tk):
         self.btn_pause.pack(side='left', padx=4)
         self.btn_rewind.pack(side='left', padx=4)
         self.movie_slider.pack(side='left', fill='x', expand=True, padx=(10,0))
+        
+    def create_dnmap_tab(self):
+        self.dnmap_fig = Figure(figsize=(5, 5))
+        self.dnmap_ax = self.dnmap_fig.add_subplot(111)
+        self.dnmap_canvas = FigureCanvasTkAgg(self.dnmap_fig, master=self.tab_dnmap)
+        self.dnmap_canvas.get_tk_widget().pack(fill='both', expand=True)
+        nav = NavigationToolbar2Tk(self.dnmap_canvas, self.tab_dnmap)
+        nav.update()
+        nav.pack(side='bottom', fill='x')
+        btn_frame = ttk.Frame(self.tab_dnmap)
+        btn_frame.pack(side='top', fill='x', padx=5, pady=5)
+        ttk.Button(btn_frame, text="Export DN Map as NPY", command=self.export_dnmap_npy).pack(side='left')
+        ttk.Button(btn_frame, text="Export DN Map as PNG", command=self.export_dnmap_png).pack(side='left')
+        btn_frame = ttk.Frame(self.tab_dnmap)
+        btn_frame.pack(side='top', fill='x', padx=5, pady=5)
+        ttk.Button(btn_frame, text="Load DN Map", command=self.load_dnmap).pack(side='left')
+
+    def export_dnmap_npy(self):
+        if self.current_dnmap is None:
+            messagebox.showwarning("No Data", "No DN map to export.")
+            return
+        fpath = filedialog.asksaveasfilename(defaultextension=".npy",
+                filetypes=[('NumPy Array', '*.npy')], title="Save DN map as NPY")
+        if not fpath: return
+        np.save(fpath, self.current_dnmap)
+        messagebox.showinfo("Exported", f"DN map saved to:\n{fpath}")
+
+    def export_dnmap_png(self):
+        if self.current_dnmap is None:
+            messagebox.showwarning("No Data", "No DN map to export.")
+            return
+        fpath = filedialog.asksaveasfilename(defaultextension=".png",
+                filetypes=[('PNG Image','*.png')], title="Save DN map as PNG")
+        if not fpath: return
+        self.dnmap_fig.savefig(fpath, dpi=150)
+        messagebox.showinfo("Exported", f"DN map saved to:\n{fpath}")
 
     def _populate_movie_primary_dropdown(self):
         # Like _populate_primary_pid_dropdown, but for movie mode
@@ -333,6 +378,23 @@ class Application(tk.Tk):
                 positions = streak[0]
                 if positions and len(positions) > 1:
                     self._setup_movie_controls(positions, which='movie')
+
+    def load_dnmap(self):
+        from tkinter import filedialog, messagebox
+        import numpy as np
+
+        fpath = filedialog.askopenfilename(
+            filetypes=[('NumPy Array', '*.npy')],
+            title="Load DN Map (.npy)"
+        )
+        if fpath:
+            try:
+                dn_map = np.load(fpath)
+                self.current_dnmap = dn_map
+                self._update_dnmap()
+                self.notebook.select(self.tab_dnmap)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not load DN map:\n{e}")
 
     def _movie_clear(self):
         self.movie_ax.clear()
@@ -654,6 +716,80 @@ class Application(tk.Tk):
                             ("" if show_all else f" > {delta_human}"))
         self.traj_ax.set_zlim(5, 0)
         self.traj_canvas.draw()
+
+    def _update_dnmap(self):
+        if self.current_dnmap is None:
+            self.dnmap_ax.clear()
+            self.dnmap_canvas.draw()
+            return
+
+        masked = np.ma.masked_invalid(self.current_dnmap)
+        # Use LogNorm for better visualization if range is large
+        from matplotlib.colors import LogNorm
+        norm = LogNorm(
+            vmin=np.nanmin(masked[masked > 0]) if np.any(masked > 0) else 1,
+            vmax=np.nanmax(masked)
+        )
+        im = self.dnmap_ax.imshow(
+            masked,
+            cmap='gray',
+            origin='lower',
+            norm=norm
+        )
+        im.cmap.set_bad(color='black')
+    # Draw or update colorbar with label
+        if not hasattr(self, '_dnmap_cb'):
+            self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
+        else:
+            self._dnmap_cb.update_normal(im)
+        self._dnmap_cb.set_label("Digital Number (DN)")
+        self.dnmap_ax.set_title("Pixelated SCA image")
+        self.dnmap_ax.set_xlabel("x (μm)")
+        self.dnmap_ax.set_ylabel("y (μm)")        
+        self.dnmap_canvas.draw()
+
+    def convert_to_dn_map(self):
+        # Prompt for input CSV
+        csvfile = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv")],
+            title="Select Energy Loss CSV"
+        )
+        if not csvfile:
+            return
+
+        # Prompt for gain map txt
+        gain_txt = filedialog.askopenfilename(
+            filetypes=[("Text files", "*.txt")],
+            title="Select Gain Map TXT"
+        )
+        if not gain_txt:
+            return
+
+        # Prompt for output .npy path
+        dn_output = filedialog.asksaveasfilename(
+            defaultextension=".npy",
+            filetypes=[("NumPy Array", "*.npy")],
+            title="Save Output DN Map As"
+        )
+        if not dn_output:
+            return
+
+        # Run in a thread (to avoid freezing GUI)
+        def do_conversion():
+            try:
+                # Optionally, show a progress dialog, or disable UI
+                H_detector_DN = process_electrons_to_DN(
+                    csvfile=csvfile,
+                    gain_txt=gain_txt,
+                    output_DN_path=dn_output
+                )
+                self.after(0, lambda: messagebox.showinfo("Success", f"DN Map saved to:\n{dn_output}"))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Error", f"Conversion failed:\n{str(e)}"))
+            self.current_dnmap = H_detector_DN
+            self.after(0, self._update_dnmap)
+
+        threading.Thread(target=do_conversion, daemon=True).start()
 
     def create_analysis_tab(self):
         frame = self.tab_analysis
@@ -1183,7 +1319,10 @@ class Application(tk.Tk):
             messagebox.showinfo("Exported", f"Energy deposition data saved to:\n{fpath}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export energy depositions:\n{str(e)}")
-        
+            
+        # After exporting the CSV
+        if messagebox.askyesno("Convert", "CSV saved. Do you want to convert to a DN map now?"):
+            self.convert_to_dn_map()
 
     def plot_wolf_number(self):
         df = self.sim.historic_df
