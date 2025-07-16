@@ -980,10 +980,17 @@ class CosmicRaySimulation:
 
             dE_dx = self.dEdx_electron(current_energy)
             dE = dE_dx * s_cm
-            current_energy -= np.abs(dE)
-            if current_energy <= 0:
-                current_energy = 0
+            
+            # Stop simulation if energy loss is negative; code added by Zac
+            if dE < 0:
+                dE = current_energy  
+                current_energy = 0 # force stop
                 break
+                
+            if dE > current_energy:
+                dE = current_energy
+                current_energy = 0
+                break   
 
             beta_val1 = np.sqrt(1 - (self.me / (current_energy + self.me))**2)
             p = beta_val1 * (current_energy + self.me) / self.c
@@ -1059,6 +1066,18 @@ class CosmicRaySimulation:
                 # Energy loss for primary particle
                 dE_dx = self.dEdx_primary(current_energy)
                 dE = dE_dx * s_cm
+                
+                # Stop simulation if energy loss is negative; code added by Zac
+                if dE < 0:
+                    dE = current_energy  
+                    current_energy = 0 # force stop
+                    break
+                
+                if dE > current_energy:
+                    dE = current_energy
+                    current_energy = 0
+                    break                              
+                
                 T_delta = 0.0
                 # --- Delta ray production ---
                 T_min = 0.001  # 1 keV in MeV
@@ -1117,11 +1136,6 @@ class CosmicRaySimulation:
                     futures.append(executor.submit(self._propagate_delta_ray_threadsafe, heatmap,
                             x0/self.cell_size, y0/self.cell_size, z0/self.cell_depth,
                             theta_global, phi_global, T_delta, delta_ray_PID, streaks))
-
-                current_energy -= dE
-                if current_energy <= 0:
-                    current_energy = 0
-                    break
 
                 mp = self.M
                 beta_val2 = np.sqrt(1 - (mp / (current_energy + mp))**2)
