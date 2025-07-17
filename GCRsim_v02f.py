@@ -1036,15 +1036,15 @@ class CosmicRaySimulation:
         new_vels = []
         energy_changes = []
         theta_init, phi_init = theta, phi
-        s_cm = s * 1e-4 #Converting step size to cm to work well with dE/dx
+        s_cm = s * 1e-4 # cm
         delta_ray_counter = 1
         primary_idx = (PID >> 14) & ((1 << 11) - 1)
-        
- # create executor for delta rays
+
+        # create executor for delta rays
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = []
 
-            while init_en > 0:
+            while current_energy > 0:
                 delta_x = s * np.sin(theta) * np.cos(phi)
                 delta_y = s * np.sin(theta) * np.sin(phi)
                 delta_z = s * np.cos(theta)
@@ -1066,18 +1066,18 @@ class CosmicRaySimulation:
                 # Energy loss for primary particle
                 dE_dx = self.dEdx_primary(current_energy)
                 dE = dE_dx * s_cm
-                
-                # Stop simulation if energy loss is negative; code added by Zac
+
+                # Stop simulation if energy loss is negative
                 if dE < 0:
-                    dE = current_energy  
-                    current_energy = 0 # force stop
+                    dE = current_energy
+                    current_energy = 0
                     break
-                
+
                 if dE > current_energy:
                     dE = current_energy
                     current_energy = 0
-                    break                              
-                
+                    break
+
                 T_delta = 0.0
                 # --- Delta ray production ---
                 T_min = 0.001  # 1 keV in MeV
@@ -1099,7 +1099,6 @@ class CosmicRaySimulation:
                     beta = self.beta(current_energy, self.M)
                     rho = self.material_density  # g/cm^3
                     s_cm = self.step_size * 1e-4  # cm
-                    # For each step, in your delta ray integral:
                     E_tot = current_energy + self.M  # total energy (MeV)
                     g_T = 1 - (beta**2 * T_centers / T_max_val) + (T_centers**2) / (2 * E_tot**2)
                     g_T = np.maximum(g_T, 0)
@@ -1107,20 +1106,24 @@ class CosmicRaySimulation:
                     integral_value = np.sum(integrand * dT_vals)
 
                     delta_N = (K/2) * (Z/A) * (z**2 / beta**2) * integral_value * rho * s_cm
-                    if delta_N > 1:
-                        print(f"WARNING: delta_N unusually high: delta_N={delta_N:.3f}\n at E={current_energy:.2f} MeV, T_max={T_max_val:.2f}, PID={self.decode_pid(PID)}") #debug print
-                        delta_N = 1  #maybe, if delta_N > 1, should we produce multiple delta rays?
 
-                #print(f"[Delta Ray Attempt] E={current_energy:.4g} T_max={T_max_val:.4g} delta_N={delta_N:.4g}") #debug print
-                
-                if np.random.uniform(0, 1) < delta_N:
-                    #print(f"Delta ray produced, E={current_energy:.4g}, delta_N={delta_N:.4g}") #debug print
+                # --- delta-ray event logic ---
+                if delta_N > 0:
+                    if delta_N < 1:
+                        # Bernoulli trial: produce 1 delta ray with probability delta_N
+                        n_delta = 1 if np.random.uniform(0, 1) < delta_N else 0
+                    else:
+                        # Poisson-draw number of delta rays when mean is >= 1
+                        n_delta = np.random.poisson(delta_N)
+                else:
+                    n_delta = 0
+
+                for _ in range(n_delta):
                     accepted = False
                     while not accepted:
                         x_inv = np.random.uniform(1/T_max_val, 1/T_min)
                         T_candidate = 1 / x_inv
-                        if np.random.uniform(0, 1) < 1:
-                            accepted = True
+                        accepted = True  
                     T_delta = T_candidate
                     current_energy -= T_delta
                     if current_energy <= 0:
@@ -1129,14 +1132,13 @@ class CosmicRaySimulation:
                     theta_delta = np.arccos(np.sqrt(T_delta / T_max_val))
                     phi_delta = 2 * np.pi * np.random.uniform(0, 1)
                     theta_global, phi_global = self.transform_angles(theta, phi, theta_delta, phi_delta)
-                    # Encode the delta ray PID:
                     delta_ray_PID = CosmicRaySimulation.encode_pid(self.species_index, primary_idx, delta_ray_counter)
                     delta_ray_counter += 1
-                    # Propagate the delta ray (secondary)
                     futures.append(executor.submit(self._propagate_delta_ray_threadsafe, heatmap,
                             x0/self.cell_size, y0/self.cell_size, z0/self.cell_depth,
                             theta_global, phi_global, T_delta, delta_ray_PID, streaks))
 
+                # Multiple scattering for primary
                 mp = self.M
                 beta_val2 = np.sqrt(1 - (mp / (current_energy + mp))**2)
                 p = beta_val2 * (current_energy + mp) / self.c
@@ -1157,15 +1159,15 @@ class CosmicRaySimulation:
                 current_vels.append((vx, vy, vz))
                 new_vels.append((vx_new,vy_new,vz_new))
                 energy_changes.append((dE, T_delta))
-                
-                            # wait for all delta‐rays to finish
+
+            # wait for all delta-rays to finish
             for _ in as_completed(futures):
                 pass
         if positions:
-            #pdb.set_trace()
             streaks.append( ( positions, PID, len(positions), theta_init, phi_init, theta, phi, theta0_values,
                             current_vels, new_vels, energy_changes, positions[0], positions[-1], init_en,
                             current_energy, delta_ray_counter - 1, True ) )
+
 
     def get_particle_color(self, PID):
         """
