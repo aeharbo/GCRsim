@@ -177,6 +177,70 @@ class Application(tk.Tk):
         nav = NavigationToolbar2Tk(self.heatmap_canvas, self.tab_heatmap)
         nav.update()
         nav.pack(side='bottom', fill='x')
+        self.heatmap_canvas.mpl_connect("button_press_event", self._on_heatmap_click)
+
+    def _on_heatmap_click(self, event):
+        """Handle click events on the heatmap to select and display info about a primary streak."""
+        if event.inaxes != self.heatmap_ax or not self.current_streaks:
+            return
+
+        x_click, y_click = event.xdata, event.ydata
+        if x_click is None or y_click is None:
+            return
+
+        min_dist = float("inf")
+        nearest_streak = None
+        nearest_pid = None
+
+        # Find the closest primary streak (delta_idx == 0)
+        for sp in self.current_streaks:
+            for b in sp:
+                for streak in b:
+                    positions, pid, *rest = streak
+                    delta_idx = pid & ((1<<14)-1)
+                    if delta_idx != 0 or len(positions) < 2:
+                        continue  # Only primary streaks, skip single-point
+                    # Find the nearest segment to the click
+                    for (x0, y0, _), (x1, y1, _) in zip(positions[:-1], positions[1:]):
+                        # Distance from point to segment
+                        px, py = x_click, y_click
+                        dx, dy = x1 - x0, y1 - y0
+                        if dx == dy == 0:
+                            dist = np.hypot(px - x0, py - y0)
+                        else:
+                            t = max(0, min(1, ((px - x0)*dx + (py - y0)*dy) / (dx*dx + dy*dy)))
+                            proj_x, proj_y = x0 + t*dx, y0 + t*dy
+                            dist = np.hypot(px - proj_x, py - proj_y)
+                        if dist < min_dist:
+                            min_dist = dist
+                            nearest_streak = streak
+                            nearest_pid = pid
+
+        # Pick a distance threshold: e.g., 25 microns (adjust to your cell size)
+        threshold = 25  # microns
+        if nearest_streak and min_dist < threshold:
+            # Display the info (e.g., with a popup or a dedicated panel)
+            info = self._format_primary_info(nearest_streak)
+            messagebox.showinfo("Primary Info", info)
+        # else: click missed all primaries; do nothing or clear panel
+
+    def _format_primary_info(self, streak):
+        positions, pid, num_steps, theta_i, phi_i, theta_f, phi_f, \
+        theta0_vals, curr_vels, new_vels, energy_changes, \
+        start_pos, end_pos, init_en, final_en, delta_count, is_primary = streak
+
+        lines = [
+            f"PID: {self.sim.decode_pid(pid)}",
+            f"Steps: {num_steps}",
+            f"Initial Position: {tuple(np.round(start_pos,3))}",
+            f"Final Position:   {tuple(np.round(end_pos,3))}",
+            f"Initial Energy:   {init_en:.3f} MeV",
+            f"Final Energy:     {final_en:.3f} MeV",
+            f"Initial θ:        {theta_i:.4f} rad ({np.degrees(theta_i):.2f}°)",
+            f"Initial φ:        {phi_i:.4f} rad ({np.degrees(phi_i):.2f}°)",
+            f"# Delta rays produced: {delta_count}",
+        ]
+        return "\n".join(lines)
 
     def create_3d_tab(self):
         frame = self.tab_3d
@@ -1489,7 +1553,6 @@ class Application(tk.Tk):
         self.hist_canvas.draw()
 
     def plot_delta_ray_energy_histogram(self):
-        # All streaks, all species
         streaks = self.current_streaks
         if not streaks:
             self.hist_ax.set_title("No data loaded")
@@ -1500,10 +1563,24 @@ class Application(tk.Tk):
         if not delta_ray_energies:
             self.hist_ax.set_title("No delta rays found")
             return
+
         bins = np.logspace(np.log10(min(delta_ray_energies)), np.log10(max(delta_ray_energies)), 100)
-        fit = 1 / bins
+        hist_vals, bin_edges = np.histogram(delta_ray_energies, bins=bins)
+        bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+
+        me = 0.511  # MeV
+        beta2 = CosmicRaySimulation.beta(bin_centers, me)**2
+        beta2 = np.clip(beta2, 1e-8, 1.0)
+        K = 0.307075   # MeV*cm^2/g 
+        Z = 58.88         # our weighted material average Z
+        A = 144.47      # our weighted material average A
+        z = -1.0       # electron charge in units of e
+        prefactor = (K/2) * (Z/A) * (z**2)
+        fit = prefactor / (bin_centers**2 * beta2)
+        fit_scaled = fit * (hist_vals.max() / fit.max())
+
         self.hist_ax.hist(delta_ray_energies, bins=bins, color='orange', alpha=0.7, edgecolor='black', label="Delta Rays")
-        self.hist_ax.plot(bins, fit * (max(np.histogram(delta_ray_energies, bins=bins)[0]) / max(fit)), 'k--', label=r'$\propto 1/T$')
+        self.hist_ax.plot(bin_centers, fit_scaled, 'k--', label=r'$\propto [T^2\beta^2]^{-1}$')
         self.hist_ax.set_xscale('log')
         self.hist_ax.set_yscale('log')
         self.hist_ax.set_xlabel(r"Initial $\delta$ ray energy (MeV)")
