@@ -238,7 +238,7 @@ class Application(tk.Tk):
             f"Final Energy:     {final_en:.3f} MeV",
             f"Initial θ:        {theta_i:.4f} rad ({np.degrees(theta_i):.2f}°)",
             f"Initial φ:        {phi_i:.4f} rad ({np.degrees(phi_i):.2f}°)",
-            f"# Delta rays produced: {delta_count}",
+            f"δ rays produced: {delta_count}",
         ]
         return "\n".join(lines)
 
@@ -806,8 +806,8 @@ class Application(tk.Tk):
         )
         im.cmap.set_bad(color='black')
         self.dnmap_ax.set_title("Pixelated SCA image")
-        self.dnmap_ax.set_xlabel("x (μm)")
-        self.dnmap_ax.set_ylabel("y (μm)")
+        self.dnmap_ax.set_xlabel("x (pixels)")
+        self.dnmap_ax.set_ylabel("y (pixels)")
         self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
         self._dnmap_cb.set_label("Digital Number (DN)")
         self.dnmap_canvas.draw()
@@ -840,8 +840,8 @@ class Application(tk.Tk):
             extent=extent
         )
         im.cmap.set_bad(color='black')
-        self.dnmap_ax.set_xlabel("x (μm)")
-        self.dnmap_ax.set_ylabel("y (μm)")
+        self.dnmap_ax.set_xlabel("x (pixels)")
+        self.dnmap_ax.set_ylabel("y (pixels)")
         self.dnmap_ax.set_title("Pixelated SCA image")
         self._dnmap_cb = self.dnmap_ax.figure.colorbar(im, ax=self.dnmap_ax)
         self._dnmap_cb.set_label("Digital Number (DN)")
@@ -1367,6 +1367,10 @@ class Application(tk.Tk):
                 handles=list(legend_handles.values()), title='Species',
                 loc='upper right', fontsize='small', framealpha=0.5
             )
+        self.heatmap_ax.set_title("GCR and δ ray tracks")
+        self.heatmap_ax.set_xlabel("x (μm)")
+        self.heatmap_ax.set_ylabel("y (μm)")
+        self._heat_cb.set_label("Number of propagation events")    
         self.heatmap_canvas.draw()
 
     def _export_positions_table(self):
