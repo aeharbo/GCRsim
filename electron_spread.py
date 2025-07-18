@@ -117,6 +117,53 @@ def process_electrons_to_DN(
 
     return H_detector_DN
 
+def process_pid_electrons_zoom(
+        csvfile,
+        pid,
+        delta_pids,
+        x_center, y_center,         # Center in physical units, e.g., microns
+        region_size_um=20,         # Region width/height in microns (e.g., 20 µm)
+        pixel_size_hi=0.1,         # Hi-res pixel size
+        kernel_size_hi=50,
+        sigma=0.314,
+        gain=None,                 # Optional: can skip gain for zoom-in, or load local patch if needed
+        chunksize=100_000
+    ):
+    """
+    Returns a hi-res array (mini-image) centered on (x_center, y_center)
+    for the selected PID and its deltas, for interactive popup display.
+    """
+    kernel = gaussian_sum_kernel(size=kernel_size_hi, sigma=sigma)
+    n_pix = int(region_size_um / pixel_size_hi)
+    H_zoom = np.zeros((n_pix, n_pix), dtype=float)
+    
+    x0_um = x_center - region_size_um / 2
+    y0_um = y_center - region_size_um / 2
+    
+    wanted_pids = set([pid] + list(delta_pids))
+
+    for chunk in pd.read_csv(csvfile, sep=',', chunksize=chunksize):
+        if 'PID' not in chunk.columns:
+            raise ValueError("CSV must have PID column.")
+        mask = chunk['PID'].isin(wanted_pids)
+        filtered = chunk[mask]
+        xs = filtered['x'].to_numpy()
+        ys = filtered['y'].to_numpy()
+        dEs = filtered['dE'].to_numpy()
+        for x, y, dE in zip(xs, ys, dEs):
+            # Check if the event falls inside the zoom region
+            if (x0_um <= x < x0_um + region_size_um) and (y0_um <= y < y0_um + region_size_um):
+                n_electrons = electron_conversion(dE)
+                if n_electrons > 0:
+                    x_pix = int((x - x0_um) / pixel_size_hi)
+                    y_pix = int((y - y0_um) / pixel_size_hi)
+                    spread_electrons_to_patch(H_zoom, x_pix, y_pix, n_electrons, kernel)
+
+    # (Optional) Gain correction for this patch won't matter if we don't use a legend for the pop up
+    # Could be added if we need it
+
+    return H_zoom
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Spread electrons and convert to DNs from cosmic ray sim CSV.")
