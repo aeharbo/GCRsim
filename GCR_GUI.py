@@ -339,6 +339,7 @@ class Application(tk.Tk):
         ttk.Button(btn_frame, text="Load DN Map", command=self.load_dnmap).pack(side='left', padx=2)
         ttk.Button(btn_frame, text="Highlight Affected Pixels", command=self.highlight_dn_pixels).pack(side='left', padx=2)
         ttk.Button(btn_frame, text="Reset View", command=self._update_dnmap).pack(side='left', padx=2)
+        self.dnmap_canvas.mpl_connect("button_press_event", self._on_dnmap_click)
 
     def export_dnmap_npy(self):
         if self.current_dnmap is None:
@@ -533,6 +534,111 @@ class Application(tk.Tk):
         idx = int(float(val))
         self.movie_frame_idx = idx
         self._movie_draw_frame(idx)
+
+    def _on_dnmap_click(self, event):
+        # Only handle double-click (ignore single clicks for pop-up)
+        if not hasattr(event, 'dblclick') or not event.dblclick:
+            return  # Only handle double-clicks
+        
+        if self.current_streaks is None or not self.current_streaks:
+            messagebox.showinfo("No Data", "No simulation streaks are loaded. Run or load a simulation first.")
+            return
+        
+        if event.inaxes != self.dnmap_ax or self.current_dnmap is None:
+            return
+
+        x_pix, y_pix = event.xdata, event.ydata
+        if x_pix is None or y_pix is None:
+            return
+
+        grid_size = self.current_dnmap.shape[0]
+        pixel_size_lo = 10.0  # or your actual low-res pixel size
+        x_um = x_pix * pixel_size_lo
+        y_um = y_pix * pixel_size_lo
+
+        closest_pid, delta_pids, x_parent, y_parent = self._find_nearest_parent_pid(x_um, y_um)
+        if closest_pid is None:
+            messagebox.showinfo("No blob found", "No primary event found near this location.")
+            return
+
+        csvfile = filedialog.askopenfilename(
+            filetypes=[("CSV files", "*.csv")],
+            title="Select Energy Loss CSV for High-Res View"
+        )
+        if not csvfile:
+            return
+
+        from electron_spread import process_pid_electrons_zoom
+        H_zoom = process_pid_electrons_zoom(
+            csvfile=csvfile,
+            pid=closest_pid,
+            delta_pids=delta_pids,
+            x_center=x_parent,
+            y_center=y_parent,
+            region_size_um=20.0,     # Or whatever region size you want
+            pixel_size_hi=0.1,
+            kernel_size_hi=50,
+            sigma=0.314
+        )
+        self._popup_zoom_dn_image(H_zoom, x_parent, y_parent, closest_pid)
+
+    def _find_nearest_parent_pid(self, x_um, y_um, max_dist_um=50):
+        """
+        Finds the parent PID whose track passes closest to (x_um, y_um).
+        Returns (parent_pid, list_of_delta_pids, nearest_x, nearest_y)
+        """
+        min_dist = float("inf")
+        parent_pid = None
+        parent_x = None
+        parent_y = None
+        # Search for the nearest primary (delta==0) streak
+        for sp in (self.current_streaks or []):
+            for b in sp:
+                for streak in b:
+                    positions, pid, *rest = streak
+                    delta_idx = pid & ((1<<14)-1)
+                    if delta_idx != 0 or len(positions) < 1:
+                        continue  # Skip deltas
+                    for (x, y, *_) in positions:
+                        dist = np.hypot(x - x_um, y - y_um)
+                        if dist < min_dist:
+                            min_dist = dist
+                            parent_pid = pid
+                            parent_x = x
+                            parent_y = y
+        if parent_pid is None or min_dist > max_dist_um:
+            return None, [], None, None
+        # Find all delta PIDs for this parent
+        delta_pids = []
+        for sp in (self.current_streaks or []):
+            for b in sp:
+                for streak in b:
+                    _, pid, *rest = streak
+                    if is_delta_of_primary(pid, parent_pid):
+                        delta_pids.append(pid)
+        return parent_pid, delta_pids, parent_x, parent_y
+
+    def _popup_zoom_dn_image(self, H_zoom, x_um, y_um, pid):
+        """Shows the high-res zoom DN image in a pop-up matplotlib window."""
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(figsize=(6, 6))
+        im = ax.imshow(
+            H_zoom,
+            origin='lower',
+            cmap='gray',
+            interpolation='nearest',
+            extent=[
+                x_um - H_zoom.shape[1]/2 * 0.1,
+                x_um + H_zoom.shape[1]/2 * 0.1,
+                y_um - H_zoom.shape[0]/2 * 0.1,
+                y_um + H_zoom.shape[0]/2 * 0.1,
+            ]
+        )
+        ax.set_title(f"High-Res DN: PID {self.sim.decode_pid(pid)}\n(center={x_um:.1f}, {y_um:.1f} µm)")
+        ax.set_xlabel("x (µm)")
+        ax.set_ylabel("y (µm)")
+        fig.colorbar(im, ax=ax, label="Electrons (arbitrary units)")
+        plt.show()
 
     def predict_flux(self):
         self.flux_button.config(state='disabled')
